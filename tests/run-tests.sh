@@ -446,15 +446,18 @@ ARL_CODEX_ARGS="-m some-model -c model_reasoning_effort=high" run_codex
 expect_rc "harmless ARL_CODEX_ARGS still allowed" 0
 
 mkdir -p "$T/tools one" "$T/tools2" "$T/home/.nvm" "$T/quo\"te"
+# The script writes resolved paths (on macOS $TMPDIR is under the /var
+# symlink and ends in a slash).
+TR=$(cd "$T" && pwd -P)
 ARL_CODEX_READ="$T/tools one:$T/tools2:$T/quo\"te" run_codex
-expect_profile "ARL_CODEX_READ dir with space" "\"$T/tools one\"=\"read\""
-expect_profile "ARL_CODEX_READ second dir" "\"$T/tools2\"=\"read\""
-expect_profile "quote in path escaped for TOML" "\"$T/quo\\\"te\"=\"read\""
+expect_profile "ARL_CODEX_READ dir with space" "\"$TR/tools one\"=\"read\""
+expect_profile "ARL_CODEX_READ second dir" "\"$TR/tools2\"=\"read\""
+expect_profile "quote in path escaped for TOML" "\"$TR/quo\\\"te\"=\"read\""
 printf 'test_cmd=./t.sh\ncodex_read=~/.nvm\ncodex_read=%s/missing\n' "$T" > .agent-review
 HOME="$T/home" run_codex
-expect_profile "codex_read with ~/ from .agent-review" "\"$T/home/.nvm\"=\"read\""
+expect_profile "codex_read with ~/ from .agent-review" "\"$TR/home/.nvm\"=\"read\""
 case "$ERR" in *"codex_read path"*"missing"*"skipped"*) ok "missing codex_read path warned and skipped" ;; *) fail "missing codex_read path warned and skipped" "$ERR" ;; esac
-if profile | grep -qF "$T/missing"; then fail "missing path not in profile"; else ok "missing path not in profile"; fi
+if profile | grep -qF "/missing\""; then fail "missing path not in profile"; else ok "missing path not in profile"; fi
 rm -f .agent-review
 
 # A linked worktree keeps its git directory in the main repository.
