@@ -406,7 +406,7 @@ codex_profile() {
     done
     # Shared temp directories are denied; the reviewer gets its own.
     for d in /tmp "${TMPDIR:-}"; do
-        [ -n "$d" ] && [ -d "$d" ] || continue
+        if [ -z "$d" ] || [ ! -d "$d" ]; then continue; fi
         [ "$d" = / ] || d="${d%/}"
         profile_add "$d" deny
         p=$(abs_path "$d")
