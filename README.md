@@ -84,6 +84,8 @@ an isolated copy.
 - A Codex implementer must run the script outside its sandbox, because the
   Claude CLI needs network access.
 - Without a test command a Claude reviewer cannot run tests.
+- The time limit (`ARL_TIMEOUT`) needs `perl` (present on macOS and nearly
+  every Linux). Without it the reviewer runs without a limit, with a warning.
 - **Isolated mode is not built.** A review in a separate git worktree would
   protect the working tree but lacks ignored files (`node_modules`, virtual
   envs, build output), so tests would fail without a per-project setup

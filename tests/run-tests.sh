@@ -25,9 +25,11 @@ FAKE="$T/fake-reviewer"
 cat > "$FAKE" <<'EOF'
 #!/usr/bin/env bash
 cat > "$FAKE_DIR/prompt.txt"
-# FAKE_CHILD: leave a child behind that writes a file 3s later, to check
-# that a timeout kills the whole process group, not just this process.
-[ -n "${FAKE_CHILD:-}" ] && { ( sleep 3; echo late > "$FAKE_CHILD" ) & }
+# FAKE_CHILD: leave a child behind that ignores TERM and writes a file 8s
+# later, to check that a timeout kills the whole process group.
+# FAKE_IGNORE_TERM: the reviewer itself ignores TERM (needs KILL).
+[ -n "${FAKE_IGNORE_TERM:-}" ] && trap '' TERM
+[ -n "${FAKE_CHILD:-}" ] && { ( trap '' TERM; sleep 8; echo late > "$FAKE_CHILD" ) & }
 [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"
 [ -n "${FAKE_TOUCH:-}" ] && echo touched >> "$FAKE_TOUCH"
 cat "$FAKE_DIR/response.md"
@@ -51,7 +53,7 @@ new_repo() {
 
 export FAKE_DIR="$T"
 export ARL_CLAUDE_CMD="$FAKE" ARL_CODEX_CMD="$FAKE" ARL_ROLE=codex ARL_LOG_DIR="$T/log"
-unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD
+unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM
 
 # run <target> [base] — runs review.sh; sets RC and ERR.
 run() {
@@ -119,35 +121,40 @@ run auto; expect_rc "malformed + question -> 6 (malformed wins)" 6
 echo "dispatch failures"
 respond '## Verdict\nAPPROVE\n'
 FAKE_RC=3 run auto; expect_rc "CLI exits non-zero -> 8" 8
-if command -v timeout >/dev/null 2>&1 || command -v perl >/dev/null 2>&1; then
-    FAKE_SLEEP=5 ARL_TIMEOUT=1 run auto; expect_rc "CLI too slow -> 7" 7
-fi
-# check_timeout_kills_children <label> — runs a reviewer that leaves a
-# delayed-writing child behind and times out; the child must not survive.
-check_timeout_kills_children() {
-    rm -f "$T/late"
-    FAKE_CHILD="$T/late" FAKE_SLEEP=10 ARL_TIMEOUT=1 run auto
-    expect_rc "$1: timeout -> 7" 7
-    sleep 4
-    if [ ! -e "$T/late" ]; then ok "$1: child process killed too"; else fail "$1: child process killed too" "child wrote after the timeout"; fi
-}
-if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
-    check_timeout_kills_children "timeout(1)"
-fi
 if command -v perl >/dev/null 2>&1; then
-    # A PATH without timeout/gtimeout forces the perl fallback (macOS case).
-    NOTIMEOUT="$T/path-without-timeout"; mkdir -p "$NOTIMEOUT"
+    FAKE_SLEEP=5 ARL_TIMEOUT=1 run auto; expect_rc "CLI too slow -> 7" 7
+
+    # The reviewer leaves a child behind that ignores TERM and writes a file
+    # 8s after start. The timeout (1s) must kill it (KILL after 5s grace),
+    # exit 7 rather than 8, and return only once the child is gone.
+    rm -f "$T/late"
+    FAKE_CHILD="$T/late" FAKE_SLEEP=20 ARL_TIMEOUT=1 run auto
+    expect_rc "timeout with a TERM-ignoring child -> 7" 7
+    sleep 9
+    if [ ! -e "$T/late" ]; then ok "TERM-ignoring child killed before return"; else fail "TERM-ignoring child killed before return" "child wrote after the timeout"; fi
+
+    # The reviewer itself ignores TERM and has to be KILLed: still exit 7
+    # (GNU timeout would report 137, which looked like a CLI failure).
+    FAKE_IGNORE_TERM=1 FAKE_SLEEP=20 ARL_TIMEOUT=1 run auto
+    expect_rc "timeout of a TERM-ignoring reviewer -> 7" 7
+
+    # Without perl there is no time limit, with a warning.
+    NOPERL="$T/path-without-perl"; mkdir -p "$NOPERL"
     IFS=: read -r -a dirs <<< "$PATH"
     for d in "${dirs[@]}"; do
         for f in "$d"/*; do
             b=$(basename "$f")
-            case "$b" in timeout|gtimeout) continue ;; esac
-            [ -x "$f" ] && [ ! -e "$NOTIMEOUT/$b" ] && ln -s "$f" "$NOTIMEOUT/$b"
+            [ "$b" = perl ] && continue
+            [ -x "$f" ] && [ ! -e "$NOPERL/$b" ] && ln -s "$f" "$NOPERL/$b"
         done
     done
-    SAVED_PATH=$PATH; PATH="$NOTIMEOUT"
-    check_timeout_kills_children "perl fallback"
+    SAVED_PATH=$PATH; PATH="$NOPERL"
+    FAKE_SLEEP=2 ARL_TIMEOUT=1 run auto
     PATH=$SAVED_PATH
+    expect_rc "no perl -> runs without limit" 0
+    case "$ERR" in *"perl not found"*) ok "no perl -> warns" ;; *) fail "no perl -> warns" "$ERR" ;; esac
+else
+    echo "  skip  timeout tests (perl not installed)"
 fi
 
 echo "snapshot failures"

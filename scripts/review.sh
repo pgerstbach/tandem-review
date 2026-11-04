@@ -27,7 +27,9 @@
 #
 # Knobs (env):
 #   ARL_MAX_ROUNDS  round limit shown to the reviewer (default 3)
-#   ARL_TIMEOUT     seconds before the reviewer is killed (default 1200, 0 = none)
+#   ARL_TIMEOUT     seconds before the reviewer and all its child processes
+#                   are killed (default 1200, 0 = none; needs perl, without
+#                   perl there is no limit and a warning)
 #   ARL_ROLE        your own role (claude|codex) if auto-detection fails
 #   ARL_LOG_DIR     where rounds are recorded (default <git-dir>/agent-review)
 #   ARL_LOG=0       do not record rounds
@@ -227,33 +229,49 @@ $(cat "$SKILL_DIR/templates/response.md")
 
 ARL_TIMEOUT="${ARL_TIMEOUT:-1200}"
 
-# run_bounded <seconds> <cmd...> — run under a time limit and, on expiry,
-# kill the command's whole process group (reviewer CLIs spawn children that
-# could otherwise keep running and keep changing files): TERM, then KILL
-# after 5s. GNU timeout/gtimeout signal their process group; the perl
-# fallback (macOS without coreutils) runs the command in its own group and
-# signals that. Expiry exits 124.
+# run_bounded <seconds> <cmd...> — run under a time limit. The command runs
+# in its own process group; on expiry the whole group gets TERM, then KILL
+# after 5s, and the function returns only once no member is left — so no
+# reviewer child (even one that ignores TERM) can keep changing files after
+# a timeout. Expiry always exits 124. Implemented in perl (ships with macOS
+# and practically every Linux with git) because GNU timeout returns as soon
+# as its direct child exits, leaving TERM-ignoring grandchildren alive, and
+# exits 137 instead of 124 when it has to KILL.
 run_bounded() {
     local t="$1"; shift
-    if [ "$t" = "0" ]; then "$@"; return; fi
-    if command -v timeout >/dev/null 2>&1; then timeout -k 5 "$t" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then gtimeout -k 5 "$t" "$@"
-    elif command -v perl >/dev/null 2>&1; then
-        perl -e '
-            my $t = shift;
-            my $pid = fork() // die "fork: $!";
-            if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127 }
-            setpgrp($pid, $pid);
-            $SIG{ALRM} = sub {
-                kill "TERM", -$pid; sleep 5; kill "KILL", -$pid; exit 124;
-            };
-            alarm $t;
-            waitpid($pid, 0);
-            exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
-        ' "$t" "$@"
-    else "$@"
-    fi
+    if [ "$t" = "0" ] || ! command -v perl >/dev/null 2>&1; then "$@"; return; fi
+    perl -e '
+        use POSIX ":sys_wait_h";
+        use Time::HiRes qw(time sleep);
+        my $t = shift;
+        my $pid = fork() // die "fork: $!\n";
+        if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
+        setpgrp($pid, $pid);    # also in the parent, so no race with kill
+        my $end = time + $t;
+        while (time < $end) {
+            if (waitpid($pid, WNOHANG) == $pid) {
+                exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+            }
+            sleep 0.1;
+        }
+        # gone: true once no process of the group is left (reaps the main
+        # child first so its zombie does not count).
+        my $gone = sub { waitpid($pid, WNOHANG); return !kill(0, -$pid) };
+        my $wait_gone = sub {
+            my $until = time + shift;
+            while (time < $until) { return 1 if $gone->(); sleep 0.1 }
+            return $gone->();
+        };
+        kill "TERM", -$pid;
+        unless ($wait_gone->(5)) { kill "KILL", -$pid; $wait_gone->(5) }
+        exit 124;
+    ' "$t" "$@"
 }
+
+# Warn here, not in run_bounded: its stderr goes to the CLI log.
+if [ "$ARL_TIMEOUT" != "0" ] && ! command -v perl >/dev/null 2>&1; then
+    echo "Warning: perl not found — running the reviewer without a time limit (ARL_TIMEOUT ignored)." >&2
+fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/arl-run.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT
@@ -308,7 +326,7 @@ case "$TARGET" in
 esac
 
 if [ "$rc" -ne 0 ]; then
-    if [ "$rc" -eq 124 ] || [ "$rc" -eq 142 ]; then
+    if [ "$rc" -eq 124 ]; then
         echo "Error: $TARGET timed out after ${ARL_TIMEOUT}s (ARL_TIMEOUT)." >&2
         out=7
     else
