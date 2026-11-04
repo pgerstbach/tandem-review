@@ -58,7 +58,8 @@
 #   7   reviewer timed out
 #   8   reviewer CLI failed
 #   1   usage error, not a git repo, unknown base, nothing to review,
-#       working tree could not be snapshotted
+#       working tree could not be snapshotted, PREV_RESPONSE from a run
+#       without a valid verdict
 #   2   reviewer CLI not installed / no target for auto
 
 set -euo pipefail
@@ -185,15 +186,25 @@ fi
 
 # --- prompt -----------------------------------------------------------------
 
-# Without ROUND, continue from the round recorded next to PREV_RESPONSE.
-if [ -z "${ROUND:-}" ] && [ -n "${PREV_RESPONSE:-}" ] &&
+# A recorded PREV_RESPONSE has a meta file next to it: refuse one without a
+# valid verdict (a partial answer is no review), and without ROUND continue
+# from its round.
+if [ -n "${PREV_RESPONSE:-}" ] &&
    [ "$(basename "$PREV_RESPONSE")" = response.md ] &&
    [ -f "$(dirname "$PREV_RESPONSE")/meta" ]; then
-    prev_round=$(sed -n 's/^round=//p' "$(dirname "$PREV_RESPONSE")/meta" | head -n1) || prev_round=""
-    case "$prev_round" in
-        ''|*[!0-9]*) ;;
-        *) ROUND=$((10#$prev_round + 1)) ;;
+    prev_meta="$(dirname "$PREV_RESPONSE")/meta"
+    prev_verdict=$(sed -n 's/^verdict=//p' "$prev_meta" | head -n1) || prev_verdict=""
+    case "$prev_verdict" in APPROVE|CONCERNS|BLOCK) ;; *)
+        echo "Error: PREV_RESPONSE is from a run with verdict=${prev_verdict:-none} — pass the response of the most recent round with a valid verdict, or none." >&2
+        exit 1 ;;
     esac
+    prev_round=$(sed -n 's/^round=//p' "$prev_meta" | head -n1) || prev_round=""
+    if [ -z "${ROUND:-}" ]; then
+        case "$prev_round" in
+            ''|*[!0-9]*) ;;
+            *) ROUND=$((10#$prev_round + 1)) ;;
+        esac
+    fi
 fi
 ROUND="${ROUND:-1}"
 ARL_MAX_ROUNDS="${ARL_MAX_ROUNDS:-3}"

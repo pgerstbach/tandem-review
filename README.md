@@ -91,8 +91,11 @@ ARL_CODEX_ARGS="-m <model> -c model_reasoning_effort=high"
 ARL_CLAUDE_ARGS="--model opus --effort high"
 ```
 
-They are split on whitespace, without quoting. Do not use them to loosen the
-reviewer's restrictions.
+They are split on whitespace, without quoting, and placed before the
+restrictions, so repeating a simple option such as `--tools` or `-s` does
+not override them. Options that add permissions (`--allowedTools`,
+`--dangerously-skip-permissions`, `-c sandbox_mode=…`) still loosen them:
+whoever sets these variables is responsible for what they pass.
 
 All inputs and knobs are listed in the header of `scripts/review.sh`.
 
@@ -131,9 +134,15 @@ throwaway repository in both directions:
 - Claude Code implementing, **Codex 0.166 reviewing**: two rounds, verdicts
   parsed correctly, `changed=no` was right, and a prompt injection planted
   in the repository was reported by Codex as a finding instead of followed.
-- Codex implementing, Claude Code reviewing.
+- Codex implementing, **Claude Code reviewing**: two rounds. Round 1 was
+  BLOCK with three real bugs (an off-by-one at a band boundary, missing
+  whitespace stripping, NaN accepted) that the passing tests missed; the
+  reviewer ran the test command. Round 2 APPROVE, `changed=no`. Codex found
+  the skill on its own. Not recorded: whether it called `auto` and how the
+  sandbox escalation went.
 
-This repository's own changes are also reviewed with the skill.
+This repository's own changes are reviewed with the skill too: Claude Code
+calling `auto`, which picks Codex.
 
 ## Tests
 

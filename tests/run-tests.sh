@@ -272,16 +272,28 @@ expect_in "human answers in prompt" "$T/prompt.txt" "Yes, keep the old API."
 PREV_RESPONSE="$T/missing.md" run auto; expect_rc "missing PREV_RESPONSE only warns" 0
 # ROUND follows from the meta file next to a recorded PREV_RESPONSE.
 mkdir -p "$T/prev-run"; cp "$T/prev.md" "$T/prev-run/response.md"
-printf 'target=codex\nround=2\n' > "$T/prev-run/meta"
+printf 'target=codex\nround=2\nverdict=BLOCK\n' > "$T/prev-run/meta"
 PREV_RESPONSE="$T/prev-run/response.md" run auto
 expect_in "ROUND derived from PREV_RESPONSE meta" "$T/prompt.txt" "Round: 3 of at most 3"
 ROUND=5 PREV_RESPONSE="$T/prev-run/response.md" run auto
 expect_in "explicit ROUND wins over meta" "$T/prompt.txt" "Round: 5 of"
-printf 'round=x\n' > "$T/prev-run/meta"
+printf 'round=x\nverdict=APPROVE\n' > "$T/prev-run/meta"
 PREV_RESPONSE="$T/prev-run/response.md" run auto
 expect_in "bad meta round -> default 1" "$T/prompt.txt" "Round: 1 of"
 PREV_RESPONSE="$T/prev.md" run auto
 expect_in "PREV_RESPONSE outside a record -> default 1" "$T/prompt.txt" "Round: 1 of"
+# A recorded run without a valid verdict is refused as the previous review.
+for v in MALFORMED TIMEOUT CLI_FAILED ''; do
+    printf 'round=2\nverdict=%s\n' "$v" > "$T/prev-run/meta"; rm -f "$T/prompt.txt"
+    PREV_RESPONSE="$T/prev-run/response.md" ROUND=3 run auto
+    expect_rc "PREV_RESPONSE with verdict='$v' -> 1" 1
+    if [ ! -e "$T/prompt.txt" ]; then ok "reviewer not started with verdict='$v'"; else fail "reviewer not started with verdict='$v'"; fi
+done
+case "$ERR" in *"verdict=none"*) ok "refusal names the bad verdict" ;; *) fail "refusal names the bad verdict" "$ERR" ;; esac
+# Real failed run end to end: its response cannot be the next PREV_RESPONSE.
+respond '## Verdict\nAPPROVE\n'; FAKE_RC=3 run auto
+FAILED_RESP=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+PREV_RESPONSE="$FAILED_RESP" run auto; expect_rc "recorded CLI_FAILED response refused -> 1" 1
 
 echo "extra CLI arguments"
 # Fake claude/codex in PATH that record their arguments, for the default
