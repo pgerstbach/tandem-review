@@ -1,0 +1,27 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Versions
+        run: |
+          bash --version | head -n1
+          git --version
+          perl -e 'print "perl $^V\n"'
+          command -v shellcheck && shellcheck --version | sed -n 2p || echo "shellcheck not installed"
+      - name: Run tests
+        run: tests/run-tests.sh
