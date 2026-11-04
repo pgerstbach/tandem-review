@@ -14,6 +14,8 @@ When you change this repository:
   `SKILL.md` and `README.md` together.
 - Keep the reviewer's restrictions: prompt on stdin; Claude with
   `--restricted`, no MCP, prompts auto-denied and Bash limited to exact
-  commands (no wildcards that admit extra flags); Codex sandboxed without
-  network. Do not hand the reviewer write or edit tools.
+  commands (no wildcards that admit extra flags); Codex in its permission
+  profile (repository and private temp writable, a fixed list readable, no
+  network, never together with `-s`, which disables the profile). Do not
+  hand the reviewer write or edit tools.
 - Be honest in commit messages about what was tested and what was not.

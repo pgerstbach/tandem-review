@@ -21,6 +21,9 @@
 #   FOCUS           what the reviewer should look at in particular
 #   TEST_CMD        test command the reviewer may run (default: `test_cmd=`
 #                   line in .agent-review at the repo root)
+#   ARL_CODEX_READ  extra directories a Codex reviewer may read, colon-
+#                   separated (also `codex_read=<dir>` lines in .agent-review,
+#                   one per line, `~/` allowed) — e.g. ~/.nvm for node
 #   ROUND           review round number, shown to the reviewer (default: the
 #                   round recorded next to PREV_RESPONSE plus 1, else 1)
 #   PREV_RESPONSE   path to the previous round's response
@@ -40,7 +43,8 @@
 #   ARL_CODEX_ARGS  e.g. `--model opus --effort high` or `-m <model> -c
 #                   model_reasoning_effort=high`. Added to the default call,
 #                   which keeps its restrictions (do not use them to loosen
-#                   those), or appended to ARL_*_CMD. Whitespace-split.
+#                   those; sandbox/permission options are refused for
+#                   codex), or appended to ARL_*_CMD. Whitespace-split.
 #
 # Output: the review on stdout; one status line on stderr:
 #   agent-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
@@ -81,6 +85,7 @@ SKILL_DIR=$(cd "$(dirname "$0")/.." && pwd)
 TOP=$(git rev-parse --show-toplevel 2>/dev/null) || {
     echo "Error: not inside a git repository" >&2; exit 1; }
 cd "$TOP"
+TOP_ABS=$(pwd -P)
 
 BASE_SHA=$(git rev-parse --verify --quiet "$BASE^{commit}") || {
     echo "Error: base ref '$BASE' does not exist" >&2; exit 1; }
@@ -310,7 +315,10 @@ if [ "$ARL_TIMEOUT" != "0" ] && ! command -v perl >/dev/null 2>&1; then
 fi
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/arl-run.XXXXXX")
-trap 'rm -rf "$WORK"' EXIT
+# The Codex reviewer's private temp directory, outside WORK so the reviewer
+# cannot see this run's files.
+REVIEWER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/arl-tmp.XXXXXX")
+trap 'rm -rf "$WORK" "$REVIEWER_TMP"' EXIT
 RESP="$WORK/response.md"
 CLI_LOG="$WORK/cli.log"
 : > "$RESP"
@@ -328,6 +336,87 @@ case "$TARGET" in
     codex)  extra_args="${ARL_CODEX_ARGS:-}" ;;
 esac
 read -r -a extra <<< "${extra_args//$'\n'/ }"
+
+# For the default codex call, refuse arguments that replace the permission
+# profile: any sandbox mode makes codex exec ignore it without a word.
+if [ "$TARGET" = codex ] && [ -z "${ARL_CODEX_CMD:-}" ]; then
+    for a in ${extra[@]+"${extra[@]}"}; do
+        case "$a" in
+            -s|-s*|--sandbox|--sandbox=*|*sandbox_mode*|*default_permissions*|*permissions.*|--full-auto|--dangerously-*)
+                echo "Error: ARL_CODEX_ARGS contains '$a', which would replace the reviewer's permission profile. Use codex_read / ARL_CODEX_READ to allow more directories." >&2
+                exit 1 ;;
+        esac
+    done
+fi
+
+# --- Codex permission profile -----------------------------------------------
+# Codex sandboxes the commands its model runs. A permission profile limits
+# what they can read: the repository (read/write), a private temp directory
+# (read/write), and what tools need to run (read). Everything else — the
+# home directory with its credentials, other repositories, other processes'
+# temp files — is invisible. Tested with codex exec on macOS (Seatbelt) and
+# with codex sandbox on Linux (bubblewrap).
+# The profile only applies without -s/sandbox_mode: with -s workspace-write
+# codex exec silently ignores it.
+
+abs_path() {
+    readlink -f "$1" 2>/dev/null ||
+        perl -MCwd -e 'print Cwd::abs_path(shift)' "$1" 2>/dev/null
+}
+toml_str() {
+    local s="${1//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    printf '"%s"' "$s"
+}
+
+codex_profile() {
+    local entries=() d p
+    profile_add() { entries+=("$(toml_str "$1")=\"$2\""); }
+    profile_add ":minimal" read
+    # The codex package: on Linux the sandbox re-executes codex from it.
+    p=$(abs_path "$(command -v codex)") && [ -n "$p" ] &&
+        profile_add "$(cd "$(dirname "$p")/.." && pwd)" read
+    # Toolchains outside :minimal. On macOS /usr/bin/git and python3 are
+    # stubs that need the Command Line Tools.
+    for d in /Library/Developer/CommandLineTools /opt/homebrew /usr/local; do
+        [ -d "$d" ] && profile_add "$d" read
+    done
+    # A worktree's or submodule's git directory can live outside the repo.
+    p=$(abs_path "$(git rev-parse --git-common-dir)")
+    case "$p/" in "$TOP_ABS"/*) ;; *) [ -n "$p" ] && profile_add "$p" read ;; esac
+    # Extra directories from ARL_CODEX_READ and .agent-review.
+    local extra_read=()
+    if [ -n "${ARL_CODEX_READ:-}" ]; then
+        local IFS=:
+        # shellcheck disable=SC2206
+        extra_read+=($ARL_CODEX_READ)
+        unset IFS
+    fi
+    if [ -f "$TOP/.agent-review" ]; then
+        while IFS= read -r p; do extra_read+=("$p"); done \
+            < <(sed -n 's/^codex_read=//p' "$TOP/.agent-review")
+    fi
+    for p in ${extra_read[@]+"${extra_read[@]}"}; do
+        case "$p" in \~/*) p="$HOME/${p#\~/}" ;; esac
+        if [ -e "$p" ]; then
+            profile_add "$(abs_path "$p")" read
+        else
+            echo "Warning: codex_read path '$p' does not exist — skipped." >&2
+        fi
+    done
+    # Shared temp directories are denied; the reviewer gets its own.
+    for d in /tmp "${TMPDIR:-}"; do
+        [ -n "$d" ] && [ -d "$d" ] || continue
+        [ "$d" = / ] || d="${d%/}"
+        profile_add "$d" deny
+        p=$(abs_path "$d")
+        [ -n "$p" ] && [ "$p" != "$d" ] && profile_add "$p" deny
+    done
+    profile_add "$TOP_ABS" write
+    profile_add "$(abs_path "$REVIEWER_TMP")" write
+    local IFS=,
+    printf '{%s}' "${entries[*]}"
+}
 
 rc=0
 STARTED=$SECONDS
@@ -363,14 +452,21 @@ case "$TARGET" in
             # shellcheck disable=SC2086
             printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CODEX_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
         else
-            # workspace-write: tests may write caches/build output in the
-            # repo; network stays off. --ignore-user-config skips user MCP
-            # servers (extra tools, and they can hang non-interactive runs).
-            # -o captures the final message; the session log goes to CLI_LOG.
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" codex exec \
+            # Permission profile (above) instead of -s; network stays off.
+            # --ignore-user-config skips user MCP servers (extra tools, and
+            # they can hang non-interactive runs). GIT_CONFIG_GLOBAL: the
+            # user's ~/.gitconfig is unreadable in the sandbox, and git
+            # aborts on an unreadable one. -o captures the final message;
+            # the session log goes to CLI_LOG.
+            profile=$(codex_profile)
+            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" \
+                env GIT_CONFIG_GLOBAL=/dev/null TMPDIR="$REVIEWER_TMP" \
+                codex exec \
                 ${extra[@]+"${extra[@]}"} \
                 --ephemeral --ignore-user-config \
-                -s workspace-write -c 'approval_policy="never"' \
+                -c 'approval_policy="never"' \
+                -c 'default_permissions="arl_reviewer"' \
+                -c "permissions.arl_reviewer.filesystem=$profile" \
                 -C "$TOP" -o "$RESP" - \
                 > "$CLI_LOG" 2>&1 || rc=$?
         fi

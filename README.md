@@ -87,6 +87,15 @@ echo .agent-review >> .git/info/exclude     # or commit it
 
 Without a test command a Claude reviewer cannot run tests at all.
 
+A Codex reviewer can only read the repository and system/tool directories
+(see below). If your tests need a toolchain in your home directory, allow
+it explicitly:
+
+```
+codex_read=~/.nvm
+codex_read=~/.pyenv
+```
+
 By hand, one round:
 
 ```bash
@@ -108,9 +117,9 @@ the agent you work with; the review adds the other vendor.
 
 | | Claude reviewer | Codex reviewer |
 |---|---|---|
-| Can read | files in the repository, including git-ignored ones such as `.env` | **any file your user can read**, also outside the repository (e.g. `~/.ssh`) |
+| Can read | files in the repository, including git-ignored ones such as `.env` | the repository (incl. git-ignored files), system directories, the Codex and Homebrew/`/usr/local` installs, Command Line Tools (macOS), and directories you add with `codex_read` — **not** your home directory, other repositories or shared temp directories |
 | Can run | only the exact `git diff` commands and the test command | any command, inside the Codex sandbox |
-| Can write | nothing (no write tools); the test command may | the repository and `/tmp` (sandbox `workspace-write`) |
+| Can write | nothing (no write tools); the test command may | the repository and a private temp directory |
 | Network | the test command is not sandboxed; the reviewer has no network tools | blocked by the sandbox |
 | MCP servers, user config | not loaded (`--strict-mcp-config`, `--restricted`) | not loaded (`--ignore-user-config`) |
 
@@ -119,8 +128,11 @@ Consequences:
 - **The test command runs project code** — and comes from `.agent-review`
   in the working tree, so a change can alter it. That edit shows up in the
   reviewed diff.
-- Keep secrets out of the repository, or use the Claude reviewer for
-  repositories with local secrets.
+- Both reviewers can read secrets inside the repository, such as `.env`.
+- The Claude reviewer itself is confined to the repository, but the test
+  command it runs is not sandboxed. The Codex reviewer's commands, including
+  the test command, run in a Codex permission profile; it was verified with
+  `codex exec` on macOS and with the Codex sandbox on Linux.
 - This design assumes you trust both agents and the project equally. It does
   not isolate the review from your working tree.
 
@@ -177,6 +189,7 @@ All inputs are environment variables; the full list is in the header of
 | `ARL_MAX_ROUNDS` | `3` | Rounds before escalating to you |
 | `ARL_TIMEOUT` | `1200` | Seconds per review (`0` = no limit) |
 | `ARL_CLAUDE_ARGS` / `ARL_CODEX_ARGS` | — | Extra reviewer arguments, e.g. model and effort |
+| `ARL_CODEX_READ` | `codex_read=` lines in `.agent-review` | Extra directories a Codex reviewer may read (colon-separated) |
 | `ARL_LOG_DIR` / `ARL_LOG=0` | `.git/agent-review` | Where runs are recorded / record only the response |
 
 Reviewer model or effort, added to the normal call:
@@ -187,11 +200,14 @@ ARL_CODEX_ARGS="-m <model> -c model_reasoning_effort=high"
 ```
 
 They are split on whitespace, without quoting, and placed before the
-restrictions, so repeating `--tools` or `-s` does not override them (Claude
-uses the later value; Codex refuses a repeated `-s`). Options that add
-permissions (`--allowedTools`, `--dangerously-skip-permissions`,
-`-c sandbox_mode=…`) do loosen them: whoever sets these variables is
-responsible for what they pass. `ARL_CLAUDE_CMD` / `ARL_CODEX_CMD` replace
+restrictions, so repeating `--tools` does not override Claude's (the later
+value wins). For Codex, sandbox and permission options (`-s`,
+`--sandbox`, `sandbox_mode`, `default_permissions`, `--full-auto`,
+`--dangerously-…`) are refused with exit 1, because any sandbox mode makes
+Codex silently ignore the permission profile. For Claude, options that add
+permissions (`--allowedTools`, `--dangerously-skip-permissions`) still
+loosen the restrictions: whoever sets these variables is responsible for
+what they pass. `ARL_CLAUDE_CMD` / `ARL_CODEX_CMD` replace
 the call entirely and drop all restrictions; they exist for wrappers and
 tests.
 

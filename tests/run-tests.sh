@@ -316,7 +316,7 @@ ARL_CODEX_CMD='' ARL_CODEX_ARGS="-m test-model  -c model_reasoning_effort=high" 
 expect_rc "codex with extra args -> 0" 0
 expect_in "codex gets extra args" "$T/args.txt" "test-model"
 expect_in "codex extra args split on whitespace" "$T/args.txt" "model_reasoning_effort=high"
-expect_in "codex keeps sandbox" "$T/args.txt" "workspace-write"
+expect_in "codex keeps its permission profile" "$T/args.txt" 'default_permissions="arl_reviewer"'
 expect_in "codex keeps --ignore-user-config" "$T/args.txt" "--ignore-user-config"
 ARL_CLAUDE_CMD='' ARL_CLAUDE_ARGS="--model test-model" PATH="$ARGS_BIN:$PATH" run claude
 expect_rc "claude with extra args -> 0" 0
@@ -394,6 +394,75 @@ if [ -f "$RESP_PATH" ]; then ok "response-only save failure retains the response
 FAKE_TOUCH="$REPO/b.txt" run auto
 case "$ERR" in *"changed=yes"*) ok "modification during review detected" ;; *) fail "modification during review detected" "$ERR" ;; esac
 expect_rc "verdict exit kept despite change" 0
+
+echo "codex permission profile"
+# A fake `codex` on PATH stands in for the default call (no ARL_CODEX_CMD):
+# it records its arguments and environment and answers via -o.
+FAKEBIN="$T/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_DIR/codex-args.txt"
+printf 'GIT_CONFIG_GLOBAL=%s\nTMPDIR=%s\n' "${GIT_CONFIG_GLOBAL:-}" "${TMPDIR:-}" > "$FAKE_DIR/codex-env.txt"
+cat > /dev/null
+while [ $# -gt 0 ]; do
+    if [ "$1" = -o ]; then printf '## Verdict\nAPPROVE\n' > "$2"; fi
+    shift
+done
+EOF
+chmod +x "$FAKEBIN/codex"
+# run_codex — default codex call through the fake.
+run_codex() { ARL_CODEX_CMD='' PATH="$FAKEBIN:$PATH" run codex; }
+profile() { sed -n 's/^permissions\.arl_reviewer\.filesystem=//p' "$T/codex-args.txt"; }
+expect_profile() { # <name> <fixed string>
+    if profile | grep -qF -- "$2"; then ok "$1"; else fail "$1" "'$2' not in $(profile)"; fi
+}
+
+new_repo
+TOP_ABS=$(pwd -P)
+run_codex; expect_rc "default codex call runs" 0
+if grep -qxE -- '-s|--sandbox|workspace-write' "$T/codex-args.txt"; then
+    fail "no -s (it would silently disable the profile)"; else ok "no -s (it would silently disable the profile)"; fi
+expect_in "profile selected" "$T/codex-args.txt" 'default_permissions="arl_reviewer"'
+expect_in "approval policy never" "$T/codex-args.txt" 'approval_policy="never"'
+expect_in "user config ignored" "$T/codex-args.txt" '--ignore-user-config'
+expect_profile ":minimal readable" '":minimal"="read"'
+expect_profile "repo writable" "\"$TOP_ABS\"=\"write\""
+expect_profile "/tmp denied" '"/tmp"="deny"'
+RTMP=$(sed -n 's/^TMPDIR=//p' "$T/codex-env.txt")
+if [ -n "$RTMP" ] && [ "$RTMP" != /tmp ] && profile | grep -qF "$(cd "$(dirname "$RTMP")" && pwd -P)/$(basename "$RTMP")\"=\"write\""; then
+    ok "private TMPDIR, writable"; else fail "private TMPDIR, writable" "TMPDIR=$RTMP; $(profile)"; fi
+if [ -n "$RTMP" ] && [ ! -e "$RTMP" ]; then ok "private TMPDIR removed afterwards"; else fail "private TMPDIR removed afterwards" "$RTMP"; fi
+expect_in "GIT_CONFIG_GLOBAL=/dev/null" "$T/codex-env.txt" "GIT_CONFIG_GLOBAL=/dev/null"
+if profile | grep -qF "$HOME\""; then fail "home directory not in profile"; else ok "home directory not in profile"; fi
+
+for bad in "-s danger-full-access" "--sandbox=workspace-write" "-c sandbox_mode=danger-full-access" \
+           "-c default_permissions=x" "--dangerously-bypass-approvals-and-sandbox" "--full-auto"; do
+    rm -f "$T/codex-args.txt"
+    ARL_CODEX_ARGS="$bad" run_codex
+    if [ "$RC" -eq 1 ] && [ ! -e "$T/codex-args.txt" ]; then ok "ARL_CODEX_ARGS '$bad' refused"
+    else fail "ARL_CODEX_ARGS '$bad' refused" "exit $RC"; fi
+done
+ARL_CODEX_ARGS="-m some-model -c model_reasoning_effort=high" run_codex
+expect_rc "harmless ARL_CODEX_ARGS still allowed" 0
+
+mkdir -p "$T/tools one" "$T/tools2" "$T/home/.nvm" "$T/quo\"te"
+ARL_CODEX_READ="$T/tools one:$T/tools2:$T/quo\"te" run_codex
+expect_profile "ARL_CODEX_READ dir with space" "\"$T/tools one\"=\"read\""
+expect_profile "ARL_CODEX_READ second dir" "\"$T/tools2\"=\"read\""
+expect_profile "quote in path escaped for TOML" "\"$T/quo\\\"te\"=\"read\""
+printf 'test_cmd=./t.sh\ncodex_read=~/.nvm\ncodex_read=%s/missing\n' "$T" > .agent-review
+HOME="$T/home" run_codex
+expect_profile "codex_read with ~/ from .agent-review" "\"$T/home/.nvm\"=\"read\""
+case "$ERR" in *"codex_read path"*"missing"*"skipped"*) ok "missing codex_read path warned and skipped" ;; *) fail "missing codex_read path warned and skipped" "$ERR" ;; esac
+if profile | grep -qF "$T/missing"; then fail "missing path not in profile"; else ok "missing path not in profile"; fi
+rm -f .agent-review
+
+# A linked worktree keeps its git directory in the main repository.
+git add -A && git commit -qm wip2
+git worktree add -q "$T/wt" 2>/dev/null
+(cd "$T/wt" && printf 'wt change\n' >> a.txt && ARL_CODEX_CMD='' PATH="$FAKEBIN:$PATH" "$REVIEW" codex >/dev/null 2>&1)
+RC=$?; expect_rc "review in a linked worktree" 0
+expect_profile "main repo's git dir readable from a worktree" "\"$TOP_ABS/.git\"=\"read\""
 
 echo "static checks"
 if bash -n "$REVIEW" && bash -n "$SELF"; then ok "bash -n"; else fail "bash -n"; fi

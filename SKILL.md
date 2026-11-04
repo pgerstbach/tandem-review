@@ -34,6 +34,10 @@ FOCUS="What the reviewer should look at" \
   round number follows from it; set `ROUND=<n>` only with `ARL_LOG=0`.
   After the human answered questions, add
   `HUMAN_ANSWERS="<their answers, verbatim>"`.
+- A Codex reviewer cannot read your home directory. If its tests fail for a
+  missing toolchain (e.g. `node`/`python` not found), ask the human whether
+  to add the directory as a `codex_read=<dir>` line in `.agent-review` (or
+  `ARL_CODEX_READ`); do not add it on your own.
 - Model or effort: `ARL_CLAUDE_ARGS` / `ARL_CODEX_ARGS` (e.g. `--model
   opus`), only when the human asked for it, never to loosen restrictions.
 
