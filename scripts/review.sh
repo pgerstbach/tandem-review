@@ -35,7 +35,7 @@
 #   ARL_CODEX_CMD   response on stdout; whitespace-split, no quoting)
 #
 # Output: the review on stdout; one status line on stderr:
-#   agent-review: verdict=<V> questions=<n> changed=<yes|no> response=<path>
+#   agent-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
 #
 # Exit codes:
 #   0   APPROVE
@@ -45,7 +45,8 @@
 #   6   response has no valid verdict (malformed)
 #   7   reviewer timed out
 #   8   reviewer CLI failed
-#   1   usage error, not a git repo, unknown base, nothing to review
+#   1   usage error, not a git repo, unknown base, nothing to review,
+#       working tree could not be snapshotted
 #   2   reviewer CLI not installed / no target for auto
 
 set -euo pipefail
@@ -120,18 +121,29 @@ fi
 # on disk plus untracked, non-ignored files. Uses a throwaway index, so the
 # real index (staged state) is never touched. The tree object lands in the
 # object store unreferenced; `git gc` prunes it after its grace period.
+# Every step is checked explicitly: errexit does not apply inside $(...),
+# and a failed `git add` would otherwise leave the copied real index in
+# place and silently snapshot a stale state.
 snapshot() {
     local idx tree
-    idx=$(mktemp "${TMPDIR:-/tmp}/arl-index.XXXXXX")
+    idx=$(mktemp "${TMPDIR:-/tmp}/arl-index.XXXXXX") || return 1
     # Start from the real index so unchanged files keep their stat cache.
     cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
-    GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1
-    tree=$(GIT_INDEX_FILE="$idx" git write-tree)
+    if ! GIT_INDEX_FILE="$idx" git add -A >/dev/null; then
+        rm -f "$idx"; return 1
+    fi
+    if ! tree=$(GIT_INDEX_FILE="$idx" git write-tree); then
+        rm -f "$idx"; return 1
+    fi
     rm -f "$idx"
+    [ -n "$tree" ] || return 1
     echo "$tree"
 }
 
-TREE=$(snapshot)
+TREE=$(snapshot) || {
+    echo "Error: could not snapshot the working tree (see the git error above)." >&2
+    exit 1
+}
 
 if git diff --quiet "$BASE_SHA" "$TREE"; then
     echo "Error: nothing to review — no difference between '$BASE' and the working tree." >&2
@@ -215,14 +227,30 @@ $(cat "$SKILL_DIR/templates/response.md")
 
 ARL_TIMEOUT="${ARL_TIMEOUT:-1200}"
 
-# run_bounded <seconds> <cmd...> — timeout(1), gtimeout, or perl alarm on
-# systems without coreutils (macOS). Expiry exits 124 (timeout) or 142 (perl).
+# run_bounded <seconds> <cmd...> — run under a time limit and, on expiry,
+# kill the command's whole process group (reviewer CLIs spawn children that
+# could otherwise keep running and keep changing files): TERM, then KILL
+# after 5s. GNU timeout/gtimeout signal their process group; the perl
+# fallback (macOS without coreutils) runs the command in its own group and
+# signals that. Expiry exits 124.
 run_bounded() {
     local t="$1"; shift
     if [ "$t" = "0" ]; then "$@"; return; fi
-    if command -v timeout >/dev/null 2>&1; then timeout "$t" "$@"
-    elif command -v gtimeout >/dev/null 2>&1; then gtimeout "$t" "$@"
-    elif command -v perl >/dev/null 2>&1; then perl -e 'alarm shift; exec @ARGV' "$t" "$@"
+    if command -v timeout >/dev/null 2>&1; then timeout -k 5 "$t" "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then gtimeout -k 5 "$t" "$@"
+    elif command -v perl >/dev/null 2>&1; then
+        perl -e '
+            my $t = shift;
+            my $pid = fork() // die "fork: $!";
+            if ($pid == 0) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV or exit 127 }
+            setpgrp($pid, $pid);
+            $SIG{ALRM} = sub {
+                kill "TERM", -$pid; sleep 5; kill "KILL", -$pid; exit 124;
+            };
+            alarm $t;
+            waitpid($pid, 0);
+            exit(($? & 127) ? 128 + ($? & 127) : $? >> 8);
+        ' "$t" "$@"
     else "$@"
     fi
 }
@@ -297,21 +325,50 @@ fi
 # --- evaluate ---------------------------------------------------------------
 
 # Did the working tree change while the reviewer ran?
-TREE_AFTER=$(snapshot)
 CHANGED=no
-if [ "$TREE_AFTER" != "$TREE" ]; then
+if ! TREE_AFTER=$(snapshot); then
+    CHANGED=unknown
+    TREE_AFTER=""
+    echo "Warning: could not snapshot the working tree after the review — changes during the review cannot be ruled out." >&2
+elif [ "$TREE_AFTER" != "$TREE" ]; then
     CHANGED=yes
     echo "Warning: the working tree changed during the review (by the reviewer or someone else):" >&2
     git diff --stat "$TREE" "$TREE_AFTER" >&2 || true
 fi
 
+# Code fences, CommonMark style: an opening run of >= 3 backticks or tildes
+# (indented at most 3 spaces) is closed only by a run of the same character
+# that is at least as long and has nothing after it. Lines inside a fence
+# are invisible to both parsers below, so quoted examples never count.
+# shellcheck disable=SC2016  # awk code, not shell
+FENCE_AWK='
+function fence(line,   ind, c, n, rest) {
+    ind = 0
+    while (substr(line, 1, 1) == " " && ind < 4) { line = substr(line, 2); ind++ }
+    if (ind > 3) return 0
+    c = substr(line, 1, 1)
+    if (c != "`" && c != "~") return 0
+    n = 0
+    while (substr(line, n + 1, 1) == c) n++
+    if (n < 3) return 0
+    rest = substr(line, n + 1)
+    if (!infence) {
+        if (c == "`" && index(rest, "`")) return 0
+        infence = 1; fch = c; flen = n
+        return 1
+    }
+    if (c == fch && n >= flen && rest ~ /^[ \t]*$/) { infence = 0; return 1 }
+    return 0
+}
+fence($0) { next }
+infence { next }
+'
+
 # Verdict: the first non-empty line after a `Verdict` heading (or the rest
 # of the heading line, e.g. "## Verdict: BLOCK") must be exactly one verdict,
 # ignoring markdown emphasis. The unfilled template "<APPROVE | CONCERNS |
 # BLOCK>" does not qualify. Headings inside code fences are ignored.
-VERDICT=$(awk '
-    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-    fence { next }
+VERDICT=$(awk "$FENCE_AWK"'
     !found && /^#+[[:space:]]*Verdict/ {
         found = 1
         rest = $0; sub(/^#+[[:space:]]*Verdict[[:space:]]*:?/, "", rest)
@@ -323,12 +380,12 @@ VERDICT=$(awk '
 case "$VERDICT" in APPROVE|CONCERNS|BLOCK) ;; *) VERDICT="" ;; esac
 
 # Questions: bullets under "## Questions for the human" up to the next
-# heading of level 1-2 or a horizontal rule. Placeholders ("none", "(none)",
-# "n/a", "<...>") do not count; anything else, e.g. "None of the tests …?",
-# does.
-QUESTIONS=$(awk '
-    /^[[:space:]]*(```|~~~)/ { fence = !fence; next }
-    fence { next }
+# heading of level 1-2 or a horizontal rule. A bullet is a placeholder only
+# if it is nothing but a "none" marker — "none", "(none)", "n/a", "- none —
+# all clear", "<...>". Anything with a question mark, or any other text
+# (e.g. "(None of the callers handle null) — is that valid"), counts: when
+# in doubt, ask the human.
+QUESTIONS=$(awk "$FENCE_AWK"'
     /^##?[[:space:]]/ { inq = ($0 ~ /^##?[[:space:]]*Questions for the human/); next }
     /^(---|\*\*\*|___)[[:space:]]*$/ { inq = 0; next }
     !inq { next }
@@ -338,10 +395,14 @@ QUESTIONS=$(awk '
         gsub(/[*_`]/, "", c)
         c = tolower(c)
         sub(/^[[:space:]]+/, "", c); sub(/[[:space:].!:]+$/, "", c)
+        if (index(c, "?")) { n++; next }
         if (c ~ /^<.*>$/) next
-        if (c ~ /^\(none/ || c ~ /^\[none/) next
-        sub(/^[[(]/, "", c); sub(/[])]$/, "", c)
+        if (c ~ /^\(.*\)$/ || c ~ /^\[.*\]$/) {
+            c = substr(c, 2, length(c) - 2)
+            sub(/^[[:space:]]+/, "", c); sub(/[[:space:].!:]+$/, "", c)
+        }
         if (c ~ /^(none|n\/a|na|no|nothing|-|—|no questions?( for the human)?|none at this time|no open questions|not applicable)$/) next
+        if (c ~ /^none[[:space:]]*(—|–|-|:|,|;)/) next
         n++
     }
     END { print n + 0 }
@@ -353,13 +414,15 @@ SAVED="$RESP"
 if [ "${ARL_LOG:-1}" != "0" ]; then
     LOG_DIR="${ARL_LOG_DIR:-$(git rev-parse --absolute-git-dir)/agent-review}"
     mkdir -p "$LOG_DIR"
-    STEM="$LOG_DIR/$(date +%Y%m%dT%H%M%S)-r$ROUND-$TARGET"
-    cp "$RESP" "$STEM-response.md"
-    printf '%s\n' "$PROMPT" > "$STEM-prompt.md"
-    git diff "$BASE_SHA" "$TREE" > "$STEM.diff"
-    printf 'target=%s\nround=%s\nbase=%s\nbase_sha=%s\ntree=%s\ntree_after=%s\nverdict=%s\nquestions=%s\n' \
-        "$TARGET" "$ROUND" "$BASE" "$BASE_SHA" "$TREE" "$TREE_AFTER" "${VERDICT:-MALFORMED}" "$QUESTIONS" > "$STEM.meta"
-    SAVED="$STEM-response.md"
+    # One fresh directory per round; mktemp makes it unique, so runs in the
+    # same second never overwrite each other or an earlier PREV_RESPONSE.
+    RUN_LOG=$(mktemp -d "$LOG_DIR/$(date +%Y%m%dT%H%M%S)-r$ROUND-$TARGET.XXXXXX")
+    cp "$RESP" "$RUN_LOG/response.md"
+    printf '%s\n' "$PROMPT" > "$RUN_LOG/prompt.md"
+    git diff "$BASE_SHA" "$TREE" > "$RUN_LOG/review.diff"
+    printf 'target=%s\nround=%s\nbase=%s\nbase_sha=%s\ntree=%s\ntree_after=%s\nchanged=%s\nverdict=%s\nquestions=%s\n' \
+        "$TARGET" "$ROUND" "$BASE" "$BASE_SHA" "$TREE" "$TREE_AFTER" "$CHANGED" "${VERDICT:-MALFORMED}" "$QUESTIONS" > "$RUN_LOG/meta"
+    SAVED="$RUN_LOG/response.md"
 else
     # Keep the response past the cleanup trap so it can be PREV_RESPONSE.
     SAVED=$(mktemp "${TMPDIR:-/tmp}/arl-response.XXXXXX")

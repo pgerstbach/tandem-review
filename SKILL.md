@@ -62,7 +62,9 @@ agent-review: verdict=CONCERNS questions=0 changed=no response=<path>
 
 If the status line says `changed=yes`, the working tree changed during the
 review. Check what changed (the warning lists it); if the reviewer modified
-files, revert that and tell the human.
+files, revert that and tell the human. `changed=unknown` means the script
+could not check (snapshot failed after the review); look at `git status`
+yourself before continuing.
 
 ### Triage
 

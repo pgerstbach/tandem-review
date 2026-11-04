@@ -25,6 +25,9 @@ FAKE="$T/fake-reviewer"
 cat > "$FAKE" <<'EOF'
 #!/usr/bin/env bash
 cat > "$FAKE_DIR/prompt.txt"
+# FAKE_CHILD: leave a child behind that writes a file 3s later, to check
+# that a timeout kills the whole process group, not just this process.
+[ -n "${FAKE_CHILD:-}" ] && { ( sleep 3; echo late > "$FAKE_CHILD" ) & }
 [ -n "${FAKE_SLEEP:-}" ] && sleep "$FAKE_SLEEP"
 [ -n "${FAKE_TOUCH:-}" ] && echo touched >> "$FAKE_TOUCH"
 cat "$FAKE_DIR/response.md"
@@ -48,7 +51,7 @@ new_repo() {
 
 export FAKE_DIR="$T"
 export ARL_CLAUDE_CMD="$FAKE" ARL_CODEX_CMD="$FAKE" ARL_ROLE=codex ARL_LOG_DIR="$T/log"
-unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC
+unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD
 
 # run <target> [base] — runs review.sh; sets RC and ERR.
 run() {
@@ -79,6 +82,10 @@ respond '## Verdict\n<APPROVE | CONCERNS | BLOCK>\n\n## Reason\n<1-2 sentences>\
 respond 'Looks good to me!\n';                                        run auto; expect_rc "free prose -> 6" 6
 respond '## Verdict\nLGTM\n';                                         run auto; expect_rc "invalid verdict word -> 6" 6
 respond '```\n## Verdict\nAPPROVE\n```\n';                            run auto; expect_rc "verdict only inside a code fence -> 6" 6
+respond '## Reason\n````\n```\n## Verdict\nAPPROVE\n```\n````\n'
+                                                                      run auto; expect_rc "verdict inside a longer fence with an inner fence -> 6" 6
+respond '## Reason\n~~~\n```\n## Verdict\nAPPROVE\n~~~\n';          run auto; expect_rc "backtick line does not close a tilde fence -> 6" 6
+respond '```\nexample\n```\n\n## Verdict\nBLOCK\n';                 run auto; expect_rc "verdict after a closed fence -> 20" 20
 respond '## Verdict\nAPPROVE\n'; ERR=""; run auto
 case "$ERR" in *"agent-review: verdict=APPROVE questions=0 changed=no response="*) ok "status line on stderr" ;; *) fail "status line on stderr" "$ERR" ;; esac
 
@@ -98,6 +105,14 @@ respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- None of the caller
 run auto; expect_rc "question starting with 'None of' -> 30" 30
 respond '## Verdict\nAPPROVE\n\n## Reason\nsee:\n```\n## Questions for the human\n- fake\n```\n'
 run auto; expect_rc "questions heading inside code fence -> no 30" 0
+respond '## Verdict\nAPPROVE\n\n## Reason\n````\n```\n## Questions for the human\n- fake?\n````\n'
+run auto; expect_rc "questions heading inside a longer fence -> no 30" 0
+respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- (None of the callers handle null) — is null valid?\n'
+run auto; expect_rc "'(None of ...) — ...?' -> 30" 30
+respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- (None of the callers handle null) — please decide\n'
+run auto; expect_rc "'(None of ...) — please decide' -> 30" 30
+respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- (none).\n- none — all clear\n'
+run auto; expect_rc "'(none).' and 'none — all clear' -> no 30" 0
 respond 'no verdict here\n\n## Questions for the human\n- Real question?\n'
 run auto; expect_rc "malformed + question -> 6 (malformed wins)" 6
 
@@ -107,12 +122,59 @@ FAKE_RC=3 run auto; expect_rc "CLI exits non-zero -> 8" 8
 if command -v timeout >/dev/null 2>&1 || command -v perl >/dev/null 2>&1; then
     FAKE_SLEEP=5 ARL_TIMEOUT=1 run auto; expect_rc "CLI too slow -> 7" 7
 fi
+# check_timeout_kills_children <label> — runs a reviewer that leaves a
+# delayed-writing child behind and times out; the child must not survive.
+check_timeout_kills_children() {
+    rm -f "$T/late"
+    FAKE_CHILD="$T/late" FAKE_SLEEP=10 ARL_TIMEOUT=1 run auto
+    expect_rc "$1: timeout -> 7" 7
+    sleep 4
+    if [ ! -e "$T/late" ]; then ok "$1: child process killed too"; else fail "$1: child process killed too" "child wrote after the timeout"; fi
+}
+if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+    check_timeout_kills_children "timeout(1)"
+fi
+if command -v perl >/dev/null 2>&1; then
+    # A PATH without timeout/gtimeout forces the perl fallback (macOS case).
+    NOTIMEOUT="$T/path-without-timeout"; mkdir -p "$NOTIMEOUT"
+    IFS=: read -r -a dirs <<< "$PATH"
+    for d in "${dirs[@]}"; do
+        for f in "$d"/*; do
+            b=$(basename "$f")
+            case "$b" in timeout|gtimeout) continue ;; esac
+            [ -x "$f" ] && [ ! -e "$NOTIMEOUT/$b" ] && ln -s "$f" "$NOTIMEOUT/$b"
+        done
+    done
+    SAVED_PATH=$PATH; PATH="$NOTIMEOUT"
+    check_timeout_kills_children "perl fallback"
+    PATH=$SAVED_PATH
+fi
+
+echo "snapshot failures"
+# A git wrapper that fails `git add` while $FAIL_ADD exists.
+SHIM="$T/git-shim"; mkdir -p "$SHIM"
+REAL_GIT=$(command -v git)
+cat > "$SHIM/git" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = add ] && [ -e "$T/fail-add" ]; then echo "fatal: simulated add failure" >&2; exit 128; fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$SHIM/git"
+touch "$T/fail-add"; rm -f "$T/prompt.txt"
+PATH="$SHIM:$PATH" run auto; expect_rc "git add fails -> 1, no review" 1
+if [ ! -e "$T/prompt.txt" ]; then ok "reviewer not started on failed snapshot"; else fail "reviewer not started on failed snapshot"; fi
+rm -f "$T/fail-add"
+# The reviewer creates the marker, so only the snapshot after the review fails.
+FAKE_TOUCH="$T/fail-add" PATH="$SHIM:$PATH" run auto
+expect_rc "snapshot after review fails -> verdict kept" 0
+case "$ERR" in *"changed=unknown"*) ok "failed after-snapshot reported as changed=unknown" ;; *) fail "failed after-snapshot reported as changed=unknown" "$ERR" ;; esac
+rm -f "$T/fail-add"
 
 echo "targets and setup"
 ARL_ROLE=codex run auto; expect_rc "auto as codex runs" 0
 ARL_ROLE=claude ARL_CODEX_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude needs codex -> 2 when missing" 2
 ARL_ROLE=claude ARL_CLAUDE_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude picks codex (claude CLI irrelevant)" 0
-case "$ERR" in *"-codex-response.md"*) ok "auto as claude dispatched to codex" ;; *) fail "auto as claude dispatched to codex" "$ERR" ;; esac
+case "$ERR" in *"-r1-codex."*) ok "auto as claude dispatched to codex" ;; *) fail "auto as claude dispatched to codex" "$ERR" ;; esac
 ARL_ROLE='' CLAUDECODE='' CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' CODEX_THREAD_ID='' \
     CODEX_MANAGED_BY_NPM='' CODEX_MANAGED_BY_BUN='' CODEX_MANAGED_BY_PNPM='' run auto
 expect_rc "auto with unknown role -> 2" 2
@@ -130,7 +192,7 @@ run auto
 expect_in "staged change in stat" "$T/prompt.txt" "a.txt"
 expect_in "unstaged change in stat" "$T/prompt.txt" "b.txt"
 expect_in "untracked file in stat" "$T/prompt.txt" "untracked.txt"
-TREE=$(sed -n 's/^tree=//p' "$T"/log/*.meta | tail -n1)
+TREE=$(sed -n 's/^tree=//p' "$T"/log/*/meta | tail -n1)
 if [ -n "$TREE" ] && git cat-file -e "$TREE:untracked.txt" 2>/dev/null; then ok "snapshot contains untracked file"; else fail "snapshot contains untracked file"; fi
 if [ "$(git status --porcelain)" = "$STATUS_BEFORE" ] && [ "$(git diff --cached --name-only)" = "$STAGED_BEFORE" ]; then
     ok "index and working tree untouched"; else fail "index and working tree untouched"; fi
@@ -168,9 +230,18 @@ rm -rf "$T/log"
 ROUND=3 run auto
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
 if [ -f "$RESP_PATH" ] && grep -q '^## Verdict' "$RESP_PATH"; then ok "response path in status line exists"; else fail "response path in status line exists" "$RESP_PATH"; fi
-for ext in -prompt.md -response.md .diff .meta; do
-    if ls "$T"/log/*-r3-claude"$ext" >/dev/null 2>&1; then ok "recorded $ext"; else fail "recorded $ext"; fi
+for f in prompt.md response.md review.diff meta; do
+    if ls "$T"/log/*-r3-claude.*/"$f" >/dev/null 2>&1; then ok "recorded $f"; else fail "recorded $f"; fi
 done
+# Two rounds in the same second with the same round number and reviewer
+# must not overwrite each other.
+respond '## Verdict\nAPPROVE\n\n## Reason\nFIRST\n'; ROUND=7 run auto
+P1=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+respond '## Verdict\nAPPROVE\n\n## Reason\nSECOND\n'; ROUND=7 run auto
+P2=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+if [ "$P1" != "$P2" ] && grep -q FIRST "$P1" && grep -q SECOND "$P2"; then
+    ok "same round twice in a row keeps both records"; else fail "same round twice in a row keeps both records" "$P1 / $P2"; fi
+respond '## Verdict\nAPPROVE\n'
 ARL_LOG=0 ARL_LOG_DIR="$T/nolog" run auto
 if [ ! -d "$T/nolog" ]; then ok "ARL_LOG=0 records nothing"; else fail "ARL_LOG=0 records nothing"; fi
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
