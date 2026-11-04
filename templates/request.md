@@ -10,7 +10,8 @@ exact `git diff` command listed there; you are only allowed to run the git
 commands listed there verbatim. Then read the surrounding code as needed —
 callers, tests, configuration — not just the changed lines.
 
-If a test command is listed, run it exactly as written and report the
+If a test command is listed, run it exactly as written — alone, not chained
+with other commands or redirections, which are denied — and report the
 result. If none is listed, say so under "What I did NOT check".
 
 ## Rules
