@@ -38,6 +38,10 @@
 #
 # Output: the review on stdout; one status line on stderr:
 #   agent-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
+#   CLI failures use verdict=TIMEOUT or CLI_FAILED, never a partial verdict.
+#   Every dispatched run is checked for changes and recorded (unless ARL_LOG=0),
+#   including full CLI output, script/CLI exit codes and CLI elapsed seconds.
+#   On recording errors, temporary output is retained and the exit code is kept.
 #
 # Exit codes:
 #   0   APPROVE
@@ -283,6 +287,7 @@ CLI_LOG="$WORK/cli.log"
 export ARL_BASE_SHA="$BASE_SHA" ARL_TREE="$TREE" ARL_TEST_CMD="$TEST_CMD"
 
 rc=0
+STARTED=$SECONDS
 case "$TARGET" in
     claude)
         if [ -n "${ARL_CLAUDE_CMD:-}" ]; then
@@ -324,7 +329,9 @@ case "$TARGET" in
         fi
         ;;
 esac
+DURATION=$((SECONDS - STARTED))
 
+out=0
 if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ]; then
         echo "Error: $TARGET timed out after ${ARL_TIMEOUT}s (ARL_TIMEOUT)." >&2
@@ -337,7 +344,6 @@ if [ "$rc" -ne 0 ]; then
         echo "Last output from the CLI:" >&2
         cat "$CLI_LOG" "$RESP" 2>/dev/null | tail -n 20 >&2
     fi
-    exit "$out"
 fi
 
 # --- evaluate ---------------------------------------------------------------
@@ -426,37 +432,56 @@ QUESTIONS=$(awk "$FENCE_AWK"'
     END { print n + 0 }
 ' "$RESP")
 
+# A failing CLI may have printed a partial response, even APPROVE/questions.
+# Keep that output for diagnosis, but do not treat it as a review result.
+if [ "$rc" -ne 0 ]; then
+    VERDICT=CLI_FAILED
+    [ "$out" -eq 7 ] && VERDICT=TIMEOUT
+    QUESTIONS=0
+elif [ -z "$VERDICT" ]; then
+    VERDICT=MALFORMED
+    out=6
+    echo "Warning: no valid verdict in the response — treat it as malformed." >&2
+elif [ "$QUESTIONS" -gt 0 ]; then
+    out=30
+else
+    case "$VERDICT" in
+        APPROVE)  out=0 ;;
+        CONCERNS) out=10 ;;
+        BLOCK)    out=20 ;;
+    esac
+fi
+
 # --- record -----------------------------------------------------------------
 
-SAVED="$RESP"
+# All commands must be checked explicitly: the caller tests this function,
+# which disables errexit inside it. Prepare artifacts before copying so a
+# bad log directory still leaves the full diagnostics in WORK.
+record_round() {
+    local log_dir run_log
+    printf '%s\n' "$PROMPT" > "$WORK/prompt.md" &&
+    git diff "$BASE_SHA" "$TREE" > "$WORK/review.diff" &&
+    printf 'target=%s\nround=%s\nbase=%s\nbase_sha=%s\ntree=%s\ntree_after=%s\nchanged=%s\nverdict=%s\nquestions=%s\nexit_code=%s\ncli_exit_code=%s\nduration_seconds=%s\n' \
+        "$TARGET" "$ROUND" "$BASE" "$BASE_SHA" "$TREE" "$TREE_AFTER" "$CHANGED" "$VERDICT" "$QUESTIONS" "$out" "$rc" "$DURATION" > "$WORK/meta" &&
+    log_dir="${ARL_LOG_DIR:-$(git rev-parse --absolute-git-dir)/agent-review}" &&
+    mkdir -p "$log_dir" &&
+    run_log=$(mktemp -d "$log_dir/$(date +%Y%m%dT%H%M%S)-r$ROUND-$TARGET.XXXXXX") &&
+    cp "$RESP" "$CLI_LOG" "$WORK/prompt.md" "$WORK/review.diff" "$WORK/meta" "$run_log/" || return 1
+    SAVED="$run_log/response.md"
+}
+
+RECORDED=no
 if [ "${ARL_LOG:-1}" != "0" ]; then
-    LOG_DIR="${ARL_LOG_DIR:-$(git rev-parse --absolute-git-dir)/agent-review}"
-    mkdir -p "$LOG_DIR"
-    # One fresh directory per round; mktemp makes it unique, so runs in the
-    # same second never overwrite each other or an earlier PREV_RESPONSE.
-    RUN_LOG=$(mktemp -d "$LOG_DIR/$(date +%Y%m%dT%H%M%S)-r$ROUND-$TARGET.XXXXXX")
-    cp "$RESP" "$RUN_LOG/response.md"
-    printf '%s\n' "$PROMPT" > "$RUN_LOG/prompt.md"
-    git diff "$BASE_SHA" "$TREE" > "$RUN_LOG/review.diff"
-    printf 'target=%s\nround=%s\nbase=%s\nbase_sha=%s\ntree=%s\ntree_after=%s\nchanged=%s\nverdict=%s\nquestions=%s\n' \
-        "$TARGET" "$ROUND" "$BASE" "$BASE_SHA" "$TREE" "$TREE_AFTER" "$CHANGED" "${VERDICT:-MALFORMED}" "$QUESTIONS" > "$RUN_LOG/meta"
-    SAVED="$RUN_LOG/response.md"
-else
-    # Keep the response past the cleanup trap so it can be PREV_RESPONSE.
-    SAVED=$(mktemp "${TMPDIR:-/tmp}/arl-response.XXXXXX")
-    cp "$RESP" "$SAVED"
+    if record_round; then RECORDED=yes; fi
+elif SAVED=$(mktemp "${TMPDIR:-/tmp}/arl-response.XXXXXX") && cp "$RESP" "$SAVED"; then
+    RECORDED=yes
+fi
+if [ "$RECORDED" = no ]; then
+    SAVED="$RESP"
+    trap - EXIT
+    echo "Warning: could not save review records; temporary output retained in $WORK." >&2
 fi
 
-cat "$RESP"
-echo "agent-review: verdict=${VERDICT:-MALFORMED} questions=$QUESTIONS changed=$CHANGED response=$SAVED" >&2
-
-if [ -z "$VERDICT" ]; then
-    echo "Warning: no valid verdict in the response — treat it as malformed." >&2
-    exit 6
-fi
-if [ "$QUESTIONS" -gt 0 ]; then exit 30; fi
-case "$VERDICT" in
-    APPROVE)  exit 0 ;;
-    CONCERNS) exit 10 ;;
-    BLOCK)    exit 20 ;;
-esac
+if [ "$rc" -eq 0 ]; then cat "$RESP"; fi
+echo "agent-review: verdict=$VERDICT questions=$QUESTIONS changed=$CHANGED response=$SAVED" >&2
+exit "$out"

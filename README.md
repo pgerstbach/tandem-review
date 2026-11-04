@@ -17,9 +17,13 @@ a human can answer, or when the loop does not converge.
    it needs and may run the test command.
 4. The verdict comes back as the exit code; `SKILL.md` tells the implementer
    what to do with each one, including round limits and when to escalate.
-5. Every round is recorded in `.git/agent-review/` (prompt, diff, response,
-   metadata incl. snapshot hash). The script re-snapshots after the review
-   and warns if the working tree changed during it.
+5. Every dispatched run, including CLI failures and timeouts, is recorded in
+   a unique directory under `.git/agent-review/`: prompt, diff, response,
+   full CLI output (`cli.log` alongside `response.md`), and metadata with
+   snapshot hashes, script/CLI exit codes, and elapsed seconds for the CLI.
+   The script re-snapshots after every run and warns about changes or an
+   unsuccessful check. `changed=yes` or `changed=unknown` requires another
+   review of the current tree before the skill can report completion.
 
 | Exit | Meaning |
 |------|---------|
@@ -27,7 +31,14 @@ a human can answer, or when the loop does not converge.
 | `30` | Reviewer has questions for the human (verdict is in the status line) |
 | `6` | Malformed response |
 | `7` / `8` | Reviewer timed out / CLI failed |
-| `1` / `2` | Usage error or nothing to review / CLI missing |
+| `1` / `2` | Usage/snapshot error or nothing to review / CLI missing |
+
+The final stderr line includes `verdict`, `questions`, `changed`, and the
+saved `response` path, including on exits 7/8 (`verdict=TIMEOUT` or
+`verdict=CLI_FAILED`). Exit codes are unchanged by the change check.
+With `ARL_LOG=0`, only the response is retained, including on failed runs.
+If saving records fails, the script warns and retains the temporary run
+directory instead; the review/CLI exit code is preserved.
 
 ## Install
 

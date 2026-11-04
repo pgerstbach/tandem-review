@@ -25,6 +25,8 @@ FAKE="$T/fake-reviewer"
 cat > "$FAKE" <<'EOF'
 #!/usr/bin/env bash
 cat > "$FAKE_DIR/prompt.txt"
+[ -n "${FAKE_STDERR:-}" ] && printf '%s\n' "$FAKE_STDERR" >&2
+[ -n "${FAKE_TOUCH_EARLY:-}" ] && echo touched >> "$FAKE_TOUCH_EARLY"
 # FAKE_CHILD: leave a child behind that ignores TERM and writes a file 8s
 # later, to check that a timeout kills the whole process group.
 # FAKE_IGNORE_TERM: the reviewer itself ignores TERM (needs KILL).
@@ -53,7 +55,7 @@ new_repo() {
 
 export FAKE_DIR="$T"
 export ARL_CLAUDE_CMD="$FAKE" ARL_CODEX_CMD="$FAKE" ARL_ROLE=codex ARL_LOG_DIR="$T/log"
-unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM
+unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM FAKE_STDERR FAKE_TOUCH_EARLY
 
 # run <target> [base] — runs review.sh; sets RC and ERR.
 run() {
@@ -119,10 +121,37 @@ respond 'no verdict here\n\n## Questions for the human\n- Real question?\n'
 run auto; expect_rc "malformed + question -> 6 (malformed wins)" 6
 
 echo "dispatch failures"
+respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- Untrusted partial question?\n'
+FAKE_RC=3 FAKE_SLEEP=1 FAKE_STDERR="CLI-ERROR-MARKER" FAKE_TOUCH="$REPO/b.txt" run auto
+expect_rc "CLI exits non-zero -> 8" 8
+expect_in "failed CLI still checks changes and reports no verdict" "$T/err" 'verdict=CLI_FAILED questions=0 changed=yes'
+if [ ! -s "$T/out" ]; then ok "failed CLI never prints a partial review on stdout"; else fail "failed CLI never prints a partial review on stdout"; fi
+ERROR_RESPONSE=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+ERROR_DIR=$(dirname "${ERROR_RESPONSE:-$T/missing/response.md}")
+expect_in "failed CLI keeps its full stdout" "$ERROR_DIR/response.md" 'Untrusted partial question?'
+expect_in "failed CLI keeps its full stderr" "$ERROR_DIR/cli.log" 'CLI-ERROR-MARKER'
+expect_in "failed CLI records script exit" "$ERROR_DIR/meta" 'exit_code=8'
+expect_in "failed CLI records raw CLI exit" "$ERROR_DIR/meta" 'cli_exit_code=3'
+if [ -f "$ERROR_DIR/meta" ] && awk -F= '$1 == "duration_seconds" && $2 >= 1 { found=1 } END { exit !found }' "$ERROR_DIR/meta"; then
+    ok "failed CLI records elapsed seconds"; else fail "failed CLI records elapsed seconds"; fi
+for f in prompt.md review.diff; do
+    if [ -s "$ERROR_DIR/$f" ]; then ok "failed CLI records $f"; else fail "failed CLI records $f"; fi
+done
+FAKE_RC=3 run codex; expect_rc "Codex CLI failure keeps exit 8" 8
+expect_in "Codex CLI failure also reports status" "$T/err" 'verdict=CLI_FAILED questions=0 changed=no'
 respond '## Verdict\nAPPROVE\n'
-FAKE_RC=3 run auto; expect_rc "CLI exits non-zero -> 8" 8
 if command -v perl >/dev/null 2>&1; then
-    FAKE_SLEEP=5 ARL_TIMEOUT=1 run auto; expect_rc "CLI too slow -> 7" 7
+    FAKE_SLEEP=5 FAKE_TOUCH_EARLY="$REPO/b.txt" FAKE_STDERR="TIMEOUT-LOG-MARKER" ARL_TIMEOUT=1 run auto
+    expect_rc "CLI too slow -> 7" 7
+    expect_in "timeout still checks changes and reports status" "$T/err" 'verdict=TIMEOUT questions=0 changed=yes'
+    TIMEOUT_RESPONSE=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+    TIMEOUT_DIR=$(dirname "${TIMEOUT_RESPONSE:-$T/missing/response.md}")
+    expect_in "timeout saves CLI output" "$TIMEOUT_DIR/cli.log" 'TIMEOUT-LOG-MARKER'
+    expect_in "timeout records script exit" "$TIMEOUT_DIR/meta" 'exit_code=7'
+    expect_in "timeout records raw CLI exit" "$TIMEOUT_DIR/meta" 'cli_exit_code=124'
+    if [ -f "$TIMEOUT_DIR/meta" ] && awk -F= '$1 == "duration_seconds" && $2 >= 1 { found=1 } END { exit !found }' "$TIMEOUT_DIR/meta"; then
+        ok "timeout records elapsed seconds"; else fail "timeout records elapsed seconds"; fi
+    if [ -f "$TIMEOUT_DIR/response.md" ]; then ok "timeout keeps even an empty response"; else fail "timeout keeps even an empty response"; fi
 
     # The reviewer leaves a child behind that ignores TERM and writes a file
     # 8s after start. The timeout (1s) must kill it (KILL after 5s grace),
@@ -176,6 +205,10 @@ FAKE_TOUCH="$T/fail-add" PATH="$SHIM:$PATH" run auto
 expect_rc "snapshot after review fails -> verdict kept" 0
 case "$ERR" in *"changed=unknown"*) ok "failed after-snapshot reported as changed=unknown" ;; *) fail "failed after-snapshot reported as changed=unknown" "$ERR" ;; esac
 rm -f "$T/fail-add"
+FAKE_RC=3 FAKE_TOUCH="$T/fail-add" PATH="$SHIM:$PATH" run auto
+expect_rc "CLI and after-snapshot failure preserve exit 8" 8
+expect_in "CLI and after-snapshot failure report uncertainty" "$T/err" 'verdict=CLI_FAILED questions=0 changed=unknown'
+rm -f "$T/fail-add"
 
 echo "targets and setup"
 ARL_ROLE=codex run auto; expect_rc "auto as codex runs" 0
@@ -199,7 +232,8 @@ run auto
 expect_in "staged change in stat" "$T/prompt.txt" "a.txt"
 expect_in "unstaged change in stat" "$T/prompt.txt" "b.txt"
 expect_in "untracked file in stat" "$T/prompt.txt" "untracked.txt"
-TREE=$(sed -n 's/^tree=//p' "$T"/log/*/meta | tail -n1)
+RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+TREE=$(sed -n 's/^tree=//p' "$(dirname "$RESP_PATH")/meta")
 if [ -n "$TREE" ] && git cat-file -e "$TREE:untracked.txt" 2>/dev/null; then ok "snapshot contains untracked file"; else fail "snapshot contains untracked file"; fi
 if [ "$(git status --porcelain)" = "$STATUS_BEFORE" ] && [ "$(git diff --cached --name-only)" = "$STAGED_BEFORE" ]; then
     ok "index and working tree untouched"; else fail "index and working tree untouched"; fi
@@ -237,9 +271,12 @@ rm -rf "$T/log"
 ROUND=3 run auto
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
 if [ -f "$RESP_PATH" ] && grep -q '^## Verdict' "$RESP_PATH"; then ok "response path in status line exists"; else fail "response path in status line exists" "$RESP_PATH"; fi
-for f in prompt.md response.md review.diff meta; do
+for f in prompt.md response.md cli.log review.diff meta; do
     if ls "$T"/log/*-r3-claude.*/"$f" >/dev/null 2>&1; then ok "recorded $f"; else fail "recorded $f"; fi
 done
+expect_in "successful review records script exit" "$(dirname "$RESP_PATH")/meta" 'exit_code=0'
+expect_in "successful review records raw CLI exit" "$(dirname "$RESP_PATH")/meta" 'cli_exit_code=0'
+expect_in "successful review still prints its response" "$T/out" '## Verdict'
 # Two rounds in the same second with the same round number and reviewer
 # must not overwrite each other.
 respond '## Verdict\nAPPROVE\n\n## Reason\nFIRST\n'; ROUND=7 run auto
@@ -253,6 +290,41 @@ ARL_LOG=0 ARL_LOG_DIR="$T/nolog" run auto
 if [ ! -d "$T/nolog" ]; then ok "ARL_LOG=0 records nothing"; else fail "ARL_LOG=0 records nothing"; fi
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
 if [ -f "$RESP_PATH" ]; then ok "ARL_LOG=0 still keeps the response for PREV_RESPONSE"; rm -f "$RESP_PATH"; else fail "ARL_LOG=0 still keeps the response"; fi
+FAKE_RC=3 ARL_LOG=0 ARL_LOG_DIR="$T/nolog" run auto
+expect_rc "ARL_LOG=0 also preserves CLI failure exit" 8
+if [ ! -d "$T/nolog" ]; then ok "ARL_LOG=0 disables failed-round records too"; else fail "ARL_LOG=0 disables failed-round records too"; fi
+RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+if [ -f "$RESP_PATH" ]; then ok "ARL_LOG=0 keeps failed response too"; rm -f "$RESP_PATH"; else fail "ARL_LOG=0 keeps failed response too"; fi
+
+# A recording failure must not mask the review/CLI result or delete diagnostics.
+printf 'not a directory\n' > "$T/blocked-log"
+mkdir -p "$T/recording-tmp"
+FAKE_RC=3 ARL_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
+expect_rc "log directory failure preserves CLI exit 8" 8
+expect_in "log directory failure warns" "$T/err" 'could not save review records'
+RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+FALLBACK_DIR=$(dirname "${RESP_PATH:-$T/missing/response.md}")
+for f in response.md cli.log prompt.md review.diff meta; do
+    if [ -f "$FALLBACK_DIR/$f" ]; then ok "recording failure retains $f"; else fail "recording failure retains $f"; fi
+done
+ARL_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
+expect_rc "log directory failure preserves APPROVE exit 0" 0
+
+# Also retain temporary output when the response-only save cannot be created.
+REAL_MKTEMP=$(command -v mktemp)
+mkdir -p "$T/mktemp-shim"
+cat > "$T/mktemp-shim/mktemp" <<EOF
+#!/usr/bin/env bash
+case "\$*" in *arl-response.*) exit 1 ;; esac
+exec "$REAL_MKTEMP" "\$@"
+EOF
+chmod +x "$T/mktemp-shim/mktemp"
+FAKE_RC=3 ARL_LOG=0 PATH="$T/mktemp-shim:$PATH" TMPDIR="$T/recording-tmp" run auto
+expect_rc "response-only save failure preserves CLI exit 8" 8
+expect_in "response-only save failure warns" "$T/err" 'could not save review records'
+RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+if [ -f "$RESP_PATH" ]; then ok "response-only save failure retains the response"; else fail "response-only save failure retains the response"; fi
+
 FAKE_TOUCH="$REPO/b.txt" run auto
 case "$ERR" in *"changed=yes"*) ok "modification during review detected" ;; *) fail "modification during review detected" "$ERR" ;; esac
 expect_rc "verdict exit kept despite change" 0
