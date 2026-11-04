@@ -55,7 +55,7 @@ new_repo() {
 
 export FAKE_DIR="$T"
 export ARL_CLAUDE_CMD="$FAKE" ARL_CODEX_CMD="$FAKE" ARL_ROLE=codex ARL_LOG_DIR="$T/log"
-unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM FAKE_STDERR FAKE_TOUCH_EARLY
+unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS ARL_CLAUDE_ARGS ARL_CODEX_ARGS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM FAKE_STDERR FAKE_TOUCH_EARLY
 
 # run <target> [base] — runs review.sh; sets RC and ERR.
 run() {
@@ -213,6 +213,11 @@ rm -f "$T/fail-add"
 echo "targets and setup"
 ARL_ROLE=codex run auto; expect_rc "auto as codex runs" 0
 ARL_ROLE=claude ARL_CODEX_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude needs codex -> 2 when missing" 2
+EMPTY_BIN="$T/empty-bin"; mkdir -p "$EMPTY_BIN"
+ARL_CODEX_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run codex; expect_rc "codex CLI missing -> 2" 2
+case "$ERR" in *"Codex app is not enough"*"codex login status"*) ok "missing codex CLI explains how to install" ;; *) fail "missing codex CLI explains how to install" "$ERR" ;; esac
+ARL_CLAUDE_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run claude; expect_rc "claude CLI missing -> 2" 2
+case "$ERR" in *"Claude app is not enough"*) ok "missing claude CLI explains how to install" ;; *) fail "missing claude CLI explains how to install" "$ERR" ;; esac
 ARL_ROLE=claude ARL_CLAUDE_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude picks codex (claude CLI irrelevant)" 0
 case "$ERR" in *"-r1-codex."*) ok "auto as claude dispatched to codex" ;; *) fail "auto as claude dispatched to codex" "$ERR" ;; esac
 ARL_ROLE='' CLAUDECODE='' CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' CODEX_THREAD_ID='' \
@@ -265,6 +270,55 @@ PREV_RESPONSE="$T/prev.md" HUMAN_ANSWERS="Yes, keep the old API." run auto
 expect_in "previous response in prompt" "$T/prompt.txt" "PREVIOUS-MARKER"
 expect_in "human answers in prompt" "$T/prompt.txt" "Yes, keep the old API."
 PREV_RESPONSE="$T/missing.md" run auto; expect_rc "missing PREV_RESPONSE only warns" 0
+# ROUND follows from the meta file next to a recorded PREV_RESPONSE.
+mkdir -p "$T/prev-run"; cp "$T/prev.md" "$T/prev-run/response.md"
+printf 'target=codex\nround=2\n' > "$T/prev-run/meta"
+PREV_RESPONSE="$T/prev-run/response.md" run auto
+expect_in "ROUND derived from PREV_RESPONSE meta" "$T/prompt.txt" "Round: 3 of at most 3"
+ROUND=5 PREV_RESPONSE="$T/prev-run/response.md" run auto
+expect_in "explicit ROUND wins over meta" "$T/prompt.txt" "Round: 5 of"
+printf 'round=x\n' > "$T/prev-run/meta"
+PREV_RESPONSE="$T/prev-run/response.md" run auto
+expect_in "bad meta round -> default 1" "$T/prompt.txt" "Round: 1 of"
+PREV_RESPONSE="$T/prev.md" run auto
+expect_in "PREV_RESPONSE outside a record -> default 1" "$T/prompt.txt" "Round: 1 of"
+
+echo "extra CLI arguments"
+# Fake claude/codex in PATH that record their arguments, for the default
+# (non-ARL_*_CMD) invocations.
+ARGS_BIN="$T/args-bin"; mkdir -p "$ARGS_BIN"
+for cli in claude codex; do
+    cat > "$ARGS_BIN/$cli" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_DIR/args.txt"
+cat > "$FAKE_DIR/prompt.txt"
+# codex writes its final message to the file after -o.
+out=""; prev=""
+for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
+if [ -n "$out" ]; then cat "$FAKE_DIR/response.md" > "$out"; else cat "$FAKE_DIR/response.md"; fi
+EOF
+    chmod +x "$ARGS_BIN/$cli"
+done
+respond '## Verdict\nAPPROVE\n'
+ARL_CODEX_CMD='' ARL_CODEX_ARGS="-m test-model  -c model_reasoning_effort=high" PATH="$ARGS_BIN:$PATH" run codex
+expect_rc "codex with extra args -> 0" 0
+expect_in "codex gets extra args" "$T/args.txt" "test-model"
+expect_in "codex extra args split on whitespace" "$T/args.txt" "model_reasoning_effort=high"
+expect_in "codex keeps sandbox" "$T/args.txt" "workspace-write"
+expect_in "codex keeps --ignore-user-config" "$T/args.txt" "--ignore-user-config"
+ARL_CLAUDE_CMD='' ARL_CLAUDE_ARGS="--model test-model" PATH="$ARGS_BIN:$PATH" run claude
+expect_rc "claude with extra args -> 0" 0
+expect_in "claude gets extra args" "$T/args.txt" "test-model"
+expect_in "claude keeps --restricted" "$T/args.txt" "--restricted"
+expect_in "claude keeps --strict-mcp-config" "$T/args.txt" "--strict-mcp-config"
+ARL_CLAUDE_CMD='' PATH="$ARGS_BIN:$PATH" run claude
+expect_rc "claude without extra args (empty array, bash 3.2) -> 0" 0
+ARL_CODEX_CMD='' ARL_CODEX_ARGS=$'-m test-model\n-c second-line-arg' PATH="$ARGS_BIN:$PATH" run codex
+expect_in "multiline extra args: all lines used" "$T/args.txt" "second-line-arg"
+ARL_CODEX_ARGS="--marker-arg" ARL_CODEX_CMD="$ARGS_BIN/codex" run codex
+expect_in "extra args appended to ARL_CODEX_CMD" "$T/args.txt" "--marker-arg"
+ARL_CLAUDE_ARGS="*" ARL_CLAUDE_CMD="$ARGS_BIN/claude" run claude
+if [ "$(cat "$T/args.txt")" = "*" ]; then ok "extra args are not globbed"; else fail "extra args are not globbed" "$(cat "$T/args.txt")"; fi
 
 echo "recording and change detection"
 rm -rf "$T/log"

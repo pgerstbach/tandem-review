@@ -21,7 +21,8 @@
 #   FOCUS           what the reviewer should look at in particular
 #   TEST_CMD        test command the reviewer may run (default: `test_cmd=`
 #                   line in .agent-review at the repo root)
-#   ROUND           review round number, shown to the reviewer (default 1)
+#   ROUND           review round number, shown to the reviewer (default: the
+#                   round recorded next to PREV_RESPONSE plus 1, else 1)
 #   PREV_RESPONSE   path to the previous round's response
 #   HUMAN_ANSWERS   the human's answers to the previous round's questions
 #
@@ -35,6 +36,11 @@
 #   ARL_LOG=0       do not record rounds
 #   ARL_CLAUDE_CMD  replace the claude invocation (prompt on stdin,
 #   ARL_CODEX_CMD   response on stdout; whitespace-split, no quoting)
+#   ARL_CLAUDE_ARGS extra reviewer CLI arguments such as model and effort,
+#   ARL_CODEX_ARGS  e.g. `--model opus --effort high` or `-m <model> -c
+#                   model_reasoning_effort=high`. Added to the default call,
+#                   which keeps its restrictions (do not use them to loosen
+#                   those), or appended to ARL_*_CMD. Whitespace-split.
 #
 # Output: the review on stdout; one status line on stderr:
 #   agent-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
@@ -115,6 +121,11 @@ if [ "$TARGET" = "auto" ]; then
 fi
 if ! installed "$TARGET"; then
     echo "Error: '$(cmd_for "$TARGET")' not found in PATH (target '$TARGET')." >&2
+    # The desktop apps do not put the CLI in PATH.
+    [ "$(cmd_for "$TARGET")" = "$TARGET" ] && case "$TARGET" in
+        codex)  echo "The Codex app is not enough; install the CLI (brew install --cask codex or npm install -g @openai/codex) and check codex login status." >&2 ;;
+        claude) echo "The Claude app is not enough; install the Claude Code CLI (curl -fsSL https://claude.ai/install.sh | bash) and run claude once to log in." >&2 ;;
+    esac
     exit 2
 fi
 if [ "$TARGET" = "$ROLE" ]; then
@@ -174,6 +185,16 @@ fi
 
 # --- prompt -----------------------------------------------------------------
 
+# Without ROUND, continue from the round recorded next to PREV_RESPONSE.
+if [ -z "${ROUND:-}" ] && [ -n "${PREV_RESPONSE:-}" ] &&
+   [ "$(basename "$PREV_RESPONSE")" = response.md ] &&
+   [ -f "$(dirname "$PREV_RESPONSE")/meta" ]; then
+    prev_round=$(sed -n 's/^round=//p' "$(dirname "$PREV_RESPONSE")/meta" | head -n1) || prev_round=""
+    case "$prev_round" in
+        ''|*[!0-9]*) ;;
+        *) ROUND=$((10#$prev_round + 1)) ;;
+    esac
+fi
 ROUND="${ROUND:-1}"
 ARL_MAX_ROUNDS="${ARL_MAX_ROUNDS:-3}"
 
@@ -286,13 +307,24 @@ CLI_LOG="$WORK/cli.log"
 # Exported for custom ARL_*_CMD wrappers.
 export ARL_BASE_SHA="$BASE_SHA" ARL_TREE="$TREE" ARL_TEST_CMD="$TEST_CMD"
 
+# Extra CLI arguments (ARL_CLAUDE_ARGS / ARL_CODEX_ARGS). read -a splits on
+# whitespace without globbing; it reads one line, so newlines become spaces
+# first. ${x[@]+...} because bash 3.2 (macOS) treats an empty array as unset
+# under set -u.
+extra=()
+case "$TARGET" in
+    claude) extra_args="${ARL_CLAUDE_ARGS:-}" ;;
+    codex)  extra_args="${ARL_CODEX_ARGS:-}" ;;
+esac
+read -r -a extra <<< "${extra_args//$'\n'/ }"
+
 rc=0
 STARTED=$SECONDS
 case "$TARGET" in
     claude)
         if [ -n "${ARL_CLAUDE_CMD:-}" ]; then
             # shellcheck disable=SC2086
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CLAUDE_CMD > "$RESP" 2> "$CLI_LOG" || rc=$?
+            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CLAUDE_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
         else
             # --restricted confines file tools to the working directory and
             # removes code-running tools unless named; Bash is then limited
@@ -305,7 +337,10 @@ case "$TARGET" in
                 "Bash(git diff --stat $BASE_SHA $TREE)"
                 "Bash($DIFF_CMD -- *)")
             [ -n "$TEST_CMD" ] && allowed+=("Bash($TEST_CMD)")
+            # Extra arguments (model, effort) go before the restrictions;
+            # they are not meant to loosen them.
             printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" claude -p \
+                ${extra[@]+"${extra[@]}"} \
                 --restricted --strict-mcp-config --no-session-persistence \
                 --permission-prompts none \
                 --tools "Read,Grep,Glob,Bash" --allowedTools "${allowed[@]}" \
@@ -315,13 +350,14 @@ case "$TARGET" in
     codex)
         if [ -n "${ARL_CODEX_CMD:-}" ]; then
             # shellcheck disable=SC2086
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CODEX_CMD > "$RESP" 2> "$CLI_LOG" || rc=$?
+            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CODEX_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
         else
             # workspace-write: tests may write caches/build output in the
             # repo; network stays off. --ignore-user-config skips user MCP
             # servers (extra tools, and they can hang non-interactive runs).
             # -o captures the final message; the session log goes to CLI_LOG.
             printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" codex exec \
+                ${extra[@]+"${extra[@]}"} \
                 --ephemeral --ignore-user-config \
                 -s workspace-write -c 'approval_policy="never"' \
                 -C "$TOP" -o "$RESP" - \

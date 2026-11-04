@@ -17,7 +17,6 @@ Nothing has to be committed. The script reviews the working tree as it is.
 ```bash
 SUMMARY="What changed and why, 1-3 sentences" \
 FOCUS="What the reviewer should look at" \
-ROUND=1 \
 <skill-dir>/scripts/review.sh auto [base-ref]
 ```
 
@@ -29,12 +28,17 @@ ROUND=1 \
 - Test command: `TEST_CMD="npm test"`, or a `test_cmd=npm test` line in
   `.agent-review` at the repo root. Without one, a Claude reviewer cannot run
   tests at all, so set it whenever the project has tests.
-- Re-review rounds also pass `ROUND=<n>`, `PREV_RESPONSE=<path>` (the
+- Re-review rounds also pass `PREV_RESPONSE=<path>` (the
   `response=` path from the most recent round with a valid verdict: exit
   0/10/20/30) and, after the human answered questions,
   `HUMAN_ANSWERS="<their answers, verbatim>"`. Keep that reference unchanged
   when retrying exit 6/7/8; never pass a malformed or partial failure response
   as the previous review. Omit it if no valid round has completed yet.
+  `ROUND` then defaults to the previous round plus 1 (read from the recorded
+  `meta`); set `ROUND=<n>` only with `ARL_LOG=0` or to correct it.
+- To pick the reviewer's model or effort, set `ARL_CLAUDE_ARGS` /
+  `ARL_CODEX_ARGS` (e.g. `--model opus`, `-m <model>`) — only when the human
+  asked for it. Never use them to loosen the reviewer's restrictions.
 
 **A review takes minutes.** Run the command with a long tool timeout (≥ 20
 min) or in the background and wait for it. Do not edit files while it runs —
@@ -62,7 +66,9 @@ agent-review: verdict=CONCERNS questions=0 changed=no response=<path>
 | `6` | Malformed response | Retry the same round once. If it fails again, report to the human. |
 | `7` | Reviewer timed out | Inspect the saved output and the time limit. Retry once if a transient failure or an insufficient limit explains it; otherwise report the cause to the human. |
 | `8` | Reviewer CLI failed | Inspect the saved output. Retry once only for a plausibly transient failure; follow the authentication rule below. If it fails again, report the error output to the human. |
-| `1`, `2` | Usage / setup error | Fix the call or snapshot error (wrong base, nothing to review, CLI missing); do not count it as a round. |
+| `1`, `2` | Usage / setup error | Fix the call or snapshot error (wrong base, nothing to review); do not count it as a round. For a missing CLI, pass the script's install hint to the human. |
+
+An APPROVE ends the loop even if it lists suggestions: they are optional.
 
 Every dispatched run, including timeout and CLI failure, gets a status line
 and a saved response. With logging enabled, the directory containing the

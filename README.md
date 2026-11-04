@@ -17,6 +17,9 @@ a human can answer, or when the loop does not converge.
    it needs and may run the test command.
 4. The verdict comes back as the exit code; `SKILL.md` tells the implementer
    what to do with each one, including round limits and when to escalate.
+   The loop ends at APPROVE (with no changes during the review), even if the
+   reviewer still lists suggestions — those are optional — or at a CONCERNS
+   round whose findings needed no further changes.
 5. Every dispatched run, including CLI failures and timeouts, is recorded in
    a unique directory under `.git/agent-review/`: prompt, diff, response,
    full CLI output (`cli.log` alongside `response.md`), and metadata with
@@ -51,10 +54,17 @@ mkdir -p ~/.claude/skills && ln -s ~/src/agent-review-loop ~/.claude/skills/agen
 mkdir -p ~/.agents/skills && ln -s ~/src/agent-review-loop ~/.agents/skills/agent-review-loop
 ```
 
-Start a new session afterwards. Both CLIs must be installed and logged in.
-The Codex skill path is taken from the Codex 0.166 binary and not yet
-verified end to end; if Codex does not pick the skill up, point it at
-`SKILL.md` from your `AGENTS.md`.
+Start a new session afterwards.
+
+**Both command-line tools must be installed and logged in — the desktop apps
+alone are not enough**, they do not put `claude` or `codex` in your PATH:
+
+```bash
+brew install --cask codex && codex login && codex login status
+curl -fsSL https://claude.ai/install.sh | bash && claude   # log in once
+```
+
+`review.sh` exits with 2 and prints this hint if the reviewer CLI is missing.
 
 ## Use
 
@@ -72,6 +82,17 @@ Put the project's test command into `.agent-review` so every round uses it:
 ```
 test_cmd=npm test
 ```
+
+To choose the reviewer's model or effort, add arguments to the normal call
+instead of replacing it with `ARL_*_CMD` (which drops its restrictions):
+
+```bash
+ARL_CODEX_ARGS="-m <model> -c model_reasoning_effort=high"
+ARL_CLAUDE_ARGS="--model opus --effort high"
+```
+
+They are split on whitespace, without quoting. Do not use them to loosen the
+reviewer's restrictions.
 
 All inputs and knobs are listed in the header of `scripts/review.sh`.
 
@@ -104,10 +125,15 @@ an isolated copy.
 
 ## Status
 
-Tested here: `tests/run-tests.sh` (fake reviewers), and a real round with
-Claude Code 2.1.318 as the reviewer. Not tested end to end: a real Codex
-review (Codex 0.166 installed, but not logged in in the test environment;
-only its sandbox behavior was checked).
+Tested: `tests/run-tests.sh` (fake reviewers), and real loops in a
+throwaway repository in both directions:
+
+- Claude Code implementing, **Codex 0.166 reviewing**: two rounds, verdicts
+  parsed correctly, `changed=no` was right, and a prompt injection planted
+  in the repository was reported by Codex as a finding instead of followed.
+- Codex implementing, Claude Code reviewing.
+
+This repository's own changes are also reviewed with the skill.
 
 ## Tests
 
