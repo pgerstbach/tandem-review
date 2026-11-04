@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 pgerstbach
+Copyright (c) 2026 Peter Gerstbach
 
 Portions (the bounded-run helper and the verdict-to-exit-code idea in
 scripts/review.sh) are adapted from ai-collab-bridge
