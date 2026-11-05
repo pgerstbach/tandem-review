@@ -1,6 +1,6 @@
 ---
 name: tandem-review
-description: Have the other coding agent (Claude Code or Codex) review your current changes and iterate on its findings autonomously, only involving the human for real decisions or when the loop does not converge. Use when the user asks for a review by Claude/Codex, a second opinion from another agent, "let the other agent check this", a cross-agent or peer review, or before declaring a non-trivial change done when the user has asked for agent reviews.
+description: Have the other coding agent (Claude Code or Codex) review your current changes and iterate on its findings autonomously, only involving the human for real decisions or when the loop does not converge. Use when the user asks for a "tandem review" (e.g. "make a tandem review", "tandem-review this"), a review by Claude/Codex, a second opinion from another agent, "let the other agent check this", a cross-agent or peer review, or before declaring a non-trivial change done when the user has asked for agent reviews.
 ---
 
 # Tandem review
