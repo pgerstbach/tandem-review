@@ -221,23 +221,24 @@ tests.
   (`CLANG_MODULE_CACHE_PATH`) and rebuilt each round, so Swift builds are
   slower; warnings about the SwiftPM or `xcrun` caches are harmless. If
   another tool fails this way, please open an issue.
-- Tools with their own sandbox cannot start it inside the Codex sandbox
-  (macOS does not nest sandboxes). SwiftPM fails with
-  `sandbox-exec: unable to open "system.sb"` / `Invalid manifest`; turn its
-  sandbox off in the project's test command, while the Codex sandbox around
-  it stays in place:
-
-  ```
-  test_cmd=swift test --disable-sandbox
-  ```
-
-- If a project's tests cannot run under the Codex sandbox at all, use the
-  Claude reviewer for it (`review.sh claude`, or name Claude when you ask
-  for the review). Its test command runs outside any sandbox, but it may run
-  only that one command. There is deliberately no switch to run the Codex
-  reviewer unsandboxed: the agent calls the script, so it could set such a
-  switch just as well as you, and an unsandboxed Codex reviewer can read
-  your home directory again.
+- **Swift on macOS: a Codex reviewer cannot run `swift test`.** Tested on a
+  real project: with the module cache redirected and SwiftPM's own sandbox
+  off (`--disable-sandbox`; macOS does not nest sandboxes), the build still
+  fails with an I/O error in its own build directory — most likely because
+  Foundation writes through the per-user temp directory
+  (`/var/folders/…/T/TemporaryItems`), which the profile denies. That
+  directory is shared by all your apps' in-progress saves, so it stays
+  denied. Other toolchains that write to fixed per-user directories can hit
+  the same wall.
+- If a project's tests cannot run under the Codex sandbox, either leave its
+  test command unset for Codex reviews (the reviewer then reads the code and
+  says it did not run tests; the implementer runs them and reports the
+  result in `SUMMARY`), or use the Claude reviewer (`review.sh claude`),
+  whose test command runs outside any sandbox but may only be that one
+  command. If Claude is also the implementer, that is a self-review.
+  There is deliberately no switch to run the Codex reviewer unsandboxed: the
+  agent calls the script, so it could set such a switch just as well as you,
+  and an unsandboxed Codex reviewer can read your home directory again.
 - A Codex implementer must run the script outside its own sandbox, because
   the Claude CLI needs network access. Codex asks you for that permission.
 - Without `perl` there is no time limit (the script warns).
