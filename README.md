@@ -1,4 +1,4 @@
-# agent-review-loop
+# tandem-review
 
 Let **Claude Code** and **Codex** review each other's work. The agent that
 made a change asks the other one for a review, fixes what is right, rejects
@@ -12,10 +12,10 @@ dependencies beyond `bash`, `git` and `perl`.
 ```
 you:     Add integer division to calc.sh, then let Codex review it.
 agent:   …implements, runs scripts/review.sh auto…
-         agent-review: verdict=CONCERNS questions=0 changed=no response=…
+         tandem-review: verdict=CONCERNS questions=0 changed=no response=…
          …fixes the division-by-zero finding, rejects one suggestion with a
          reason, runs round 2…
-         agent-review: verdict=APPROVE questions=0 changed=no response=…
+         tandem-review: verdict=APPROVE questions=0 changed=no response=…
 agent:   Review done: 2 rounds with Codex, final APPROVE. Fixed: … Rejected: …
          Tests: ./test.sh run by the reviewer, passing.
 ```
@@ -62,12 +62,12 @@ CONCERNS
 ## Install
 
 ```bash
-git clone https://github.com/pgerstbach/agent-review-loop ~/src/agent-review-loop
+git clone https://github.com/pgerstbach/tandem-review ~/src/tandem-review
 
 # Claude Code
-mkdir -p ~/.claude/skills && ln -s ~/src/agent-review-loop ~/.claude/skills/agent-review-loop
+mkdir -p ~/.claude/skills && ln -s ~/src/tandem-review ~/.claude/skills/tandem-review
 # Codex
-mkdir -p ~/.agents/skills && ln -s ~/src/agent-review-loop ~/.agents/skills/agent-review-loop
+mkdir -p ~/.agents/skills && ln -s ~/src/tandem-review ~/.agents/skills/tandem-review
 ```
 
 Start a new session afterwards. To uninstall, remove the two symlinks.
@@ -81,8 +81,8 @@ rounds, triage, escalation, and a final summary.
 Tell the reviewer how to run your tests, once per project:
 
 ```bash
-echo 'test_cmd=npm test' > .agent-review
-echo .agent-review >> .git/info/exclude     # or commit it
+echo 'test_cmd=npm test' > .tandem-review
+echo .tandem-review >> .git/info/exclude     # or commit it
 ```
 
 Without a test command a Claude reviewer cannot run tests at all.
@@ -100,9 +100,9 @@ By hand, one round:
 
 ```bash
 SUMMARY="Adds div() with tests" FOCUS="edge cases" \
-  ~/src/agent-review-loop/scripts/review.sh codex          # uncommitted changes only
+  ~/src/tandem-review/scripts/review.sh codex          # uncommitted changes only
 SUMMARY="Adds div() with tests" \
-  ~/src/agent-review-loop/scripts/review.sh codex main     # everything since main
+  ~/src/tandem-review/scripts/review.sh codex main     # everything since main
 ```
 
 Nothing has to be committed. The default base `HEAD` reviews exactly the
@@ -125,7 +125,7 @@ the agent you work with; the review adds the other vendor.
 
 Consequences:
 
-- **The test command runs project code** — and comes from `.agent-review`
+- **The test command runs project code** — and comes from `.tandem-review`
   in the working tree, so a change can alter it. That edit shows up in the
   reviewed diff.
 - Both reviewers can read secrets inside the repository, such as `.env`.
@@ -162,20 +162,20 @@ following it. That is a mitigation, not a guarantee.
    | `1` / `2` | Usage or snapshot error, nothing to review / CLI missing |
 
    The last stderr line is a status, also on exits 7 and 8:
-   `agent-review: verdict=… questions=… changed=… response=<path>`.
+   `tandem-review: verdict=… questions=… changed=… response=<path>`.
 4. After the run the script snapshots again and reports `changed=yes` if
    the working tree changed during the review (`unknown` if it could not
    check). A changed tree needs another review before the loop may finish.
-5. Every run is recorded in its own directory under `.git/agent-review/`:
+5. Every run is recorded in its own directory under `.git/tandem-review/`:
    prompt, diff, response, full CLI output, and metadata (snapshot hashes,
-   exit codes, duration). `ARL_LOG=0` keeps only the response.
+   exit codes, duration). `TANDEM_LOG=0` keeps only the response.
 6. On a timeout the reviewer and all its child processes are terminated
    before the script returns.
 
 `SKILL.md` turns the exit codes into the loop: fix or reject each finding,
 re-run with the previous response, stop at APPROVE (open suggestions are
 optional), stop and ask you on exit 30, retry 6/7/8 once, escalate after
-`ARL_MAX_ROUNDS` (default 3) or when the agents disagree on the same finding
+`TANDEM_MAX_ROUNDS` (default 3) or when the agents disagree on the same finding
 twice.
 
 ## Configuration
@@ -185,18 +185,18 @@ All inputs are environment variables; the full list is in the header of
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `TEST_CMD` | `test_cmd=` in `.agent-review` | Test command the reviewer may run |
-| `ARL_MAX_ROUNDS` | `3` | Rounds before escalating to you |
-| `ARL_TIMEOUT` | `1200` | Seconds per review (`0` = no limit) |
-| `ARL_CLAUDE_ARGS` / `ARL_CODEX_ARGS` | — | Extra reviewer arguments, e.g. model and effort |
-| `ARL_CODEX_READ` | `codex_read=` lines in `.agent-review` | Extra directories a Codex reviewer may read (colon-separated) |
-| `ARL_LOG_DIR` / `ARL_LOG=0` | `.git/agent-review` | Where runs are recorded / record only the response |
+| `TEST_CMD` | `test_cmd=` in `.tandem-review` | Test command the reviewer may run |
+| `TANDEM_MAX_ROUNDS` | `3` | Rounds before escalating to you |
+| `TANDEM_TIMEOUT` | `1200` | Seconds per review (`0` = no limit) |
+| `TANDEM_CLAUDE_ARGS` / `TANDEM_CODEX_ARGS` | — | Extra reviewer arguments, e.g. model and effort |
+| `TANDEM_CODEX_READ` | `codex_read=` lines in `.tandem-review` | Extra directories a Codex reviewer may read (colon-separated) |
+| `TANDEM_LOG_DIR` / `TANDEM_LOG=0` | `.git/tandem-review` | Where runs are recorded / record only the response |
 
 Reviewer model or effort, added to the normal call:
 
 ```bash
-ARL_CLAUDE_ARGS="--model opus --effort high"
-ARL_CODEX_ARGS="-m <model> -c model_reasoning_effort=high"
+TANDEM_CLAUDE_ARGS="--model opus --effort high"
+TANDEM_CODEX_ARGS="-m <model> -c model_reasoning_effort=high"
 ```
 
 They are split on whitespace, without quoting, and placed before the
@@ -207,7 +207,7 @@ value wins). For Codex, sandbox and permission options (`-s`,
 Codex silently ignore the permission profile. For Claude, options that add
 permissions (`--allowedTools`, `--dangerously-skip-permissions`) still
 loosen the restrictions: whoever sets these variables is responsible for
-what they pass. `ARL_CLAUDE_CMD` / `ARL_CODEX_CMD` replace
+what they pass. `TANDEM_CLAUDE_CMD` / `TANDEM_CODEX_CMD` replace
 the call entirely and drop all restrictions; they exist for wrappers and
 tests.
 

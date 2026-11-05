@@ -17,39 +17,39 @@
 # the working tree changed meanwhile.
 #
 # Inputs (env, all optional):
-#   SUMMARY         what the change does and why (written by the implementer)
-#   FOCUS           what the reviewer should look at in particular
-#   TEST_CMD        test command the reviewer may run (default: `test_cmd=`
-#                   line in .agent-review at the repo root)
-#   ARL_CODEX_READ  extra directories a Codex reviewer may read, colon-
-#                   separated (also `codex_read=<dir>` lines in .agent-review,
-#                   one per line, `~/` allowed) — e.g. ~/.nvm for node
-#   ROUND           review round number, shown to the reviewer (default: the
-#                   round recorded next to PREV_RESPONSE plus 1, else 1)
-#   PREV_RESPONSE   path to the previous round's response
-#   HUMAN_ANSWERS   the human's answers to the previous round's questions
+#   SUMMARY             what the change does and why (written by the implementer)
+#   FOCUS               what the reviewer should look at in particular
+#   TEST_CMD            test command the reviewer may run (default: `test_cmd=`
+#                       line in .tandem-review at the repo root)
+#   TANDEM_CODEX_READ   extra directories a Codex reviewer may read, colon-
+#                       separated (also `codex_read=<dir>` lines in .tandem-review,
+#                       one per line, `~/` allowed) — e.g. ~/.nvm for node
+#   ROUND               review round number, shown to the reviewer (default: the
+#                       round recorded next to PREV_RESPONSE plus 1, else 1)
+#   PREV_RESPONSE       path to the previous round's response
+#   HUMAN_ANSWERS       the human's answers to the previous round's questions
 #
 # Knobs (env):
-#   ARL_MAX_ROUNDS  round limit shown to the reviewer (default 3)
-#   ARL_TIMEOUT     seconds before the reviewer and all its child processes
-#                   are killed (default 1200, 0 = none; needs perl, without
-#                   perl there is no limit and a warning)
-#   ARL_ROLE        your own role (claude|codex) if auto-detection fails
-#   ARL_LOG_DIR     where rounds are recorded (default <git-dir>/agent-review)
-#   ARL_LOG=0       do not record rounds
-#   ARL_CLAUDE_CMD  replace the claude invocation (prompt on stdin,
-#   ARL_CODEX_CMD   response on stdout; whitespace-split, no quoting)
-#   ARL_CLAUDE_ARGS extra reviewer CLI arguments such as model and effort,
-#   ARL_CODEX_ARGS  e.g. `--model opus --effort high` or `-m <model> -c
-#                   model_reasoning_effort=high`. Added to the default call,
-#                   which keeps its restrictions (do not use them to loosen
-#                   those; sandbox/permission options are refused for
-#                   codex), or appended to ARL_*_CMD. Whitespace-split.
+#   TANDEM_MAX_ROUNDS   round limit shown to the reviewer (default 3)
+#   TANDEM_TIMEOUT      seconds before the reviewer and all its child processes
+#                       are killed (default 1200, 0 = none; needs perl, without
+#                       perl there is no limit and a warning)
+#   TANDEM_ROLE         your own role (claude|codex) if auto-detection fails
+#   TANDEM_LOG_DIR      where rounds are recorded (default <git-dir>/tandem-review)
+#   TANDEM_LOG=0        do not record rounds
+#   TANDEM_CLAUDE_CMD   replace the claude invocation (prompt on stdin,
+#   TANDEM_CODEX_CMD    response on stdout; whitespace-split, no quoting)
+#   TANDEM_CLAUDE_ARGS  extra reviewer CLI arguments such as model and effort,
+#   TANDEM_CODEX_ARGS   e.g. `--model opus --effort high` or `-m <model> -c
+#                       model_reasoning_effort=high`. Added to the default call,
+#                       which keeps its restrictions (do not use them to loosen
+#                       those; sandbox/permission options are refused for
+#                       codex), or appended to TANDEM_*_CMD. Whitespace-split.
 #
 # Output: the review on stdout; one status line on stderr:
-#   agent-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
+#   tandem-review: verdict=<V> questions=<n> changed=<yes|no|unknown> response=<path>
 #   CLI failures use verdict=TIMEOUT or CLI_FAILED, never a partial verdict.
-#   Every dispatched run is checked for changes and recorded (unless ARL_LOG=0),
+#   Every dispatched run is checked for changes and recorded (unless TANDEM_LOG=0),
 #   including full CLI output, script/CLI exit codes and CLI elapsed seconds.
 #   On recording errors, temporary output is retained and the exit code is kept.
 #
@@ -93,7 +93,7 @@ BASE_SHA=$(git rev-parse --verify --quiet "$BASE^{commit}") || {
 # --- role and target --------------------------------------------------------
 
 detect_role() {
-    if [ -n "${ARL_ROLE:-}" ]; then echo "$ARL_ROLE"; return; fi
+    if [ -n "${TANDEM_ROLE:-}" ]; then echo "$TANDEM_ROLE"; return; fi
     if [ "${CLAUDECODE:-}" = "1" ]; then echo claude; return; fi
     # Codex sets these in the environment of the commands it runs.
     if [ -n "${CODEX_SANDBOX:-}${CODEX_SANDBOX_NETWORK_DISABLED:-}${CODEX_THREAD_ID:-}${CODEX_MANAGED_BY_NPM:-}${CODEX_MANAGED_BY_BUN:-}${CODEX_MANAGED_BY_PNPM:-}" ]; then
@@ -104,8 +104,8 @@ detect_role() {
 
 cmd_for() {
     case "$1" in
-        claude) echo "${ARL_CLAUDE_CMD:-claude}" ;;
-        codex)  echo "${ARL_CODEX_CMD:-codex}" ;;
+        claude) echo "${TANDEM_CLAUDE_CMD:-claude}" ;;
+        codex)  echo "${TANDEM_CODEX_CMD:-codex}" ;;
     esac
 }
 
@@ -121,7 +121,7 @@ if [ "$TARGET" = "auto" ]; then
         claude) TARGET=codex ;;
         codex)  TARGET=claude ;;
         *)
-            echo "Error: cannot tell whether you are claude or codex — set ARL_ROLE or name the target." >&2
+            echo "Error: cannot tell whether you are claude or codex — set TANDEM_ROLE or name the target." >&2
             exit 2 ;;
     esac
 fi
@@ -149,7 +149,7 @@ fi
 # place and silently snapshot a stale state.
 snapshot() {
     local idx tree
-    idx=$(mktemp "${TMPDIR:-/tmp}/arl-index.XXXXXX") || return 1
+    idx=$(mktemp "${TMPDIR:-/tmp}/tandem-index.XXXXXX") || return 1
     # Start from the real index so unchanged files keep their stat cache.
     cp "$(git rev-parse --git-path index)" "$idx" 2>/dev/null || rm -f "$idx"
     if ! GIT_INDEX_FILE="$idx" git add -A >/dev/null; then
@@ -178,9 +178,9 @@ DIFF_CMD="git diff $BASE_SHA $TREE"
 
 # --- test command -----------------------------------------------------------
 
-if [ -z "${TEST_CMD:-}" ] && [ -f .agent-review ]; then
+if [ -z "${TEST_CMD:-}" ] && [ -f .tandem-review ]; then
     # Read, never source: the file is data.
-    TEST_CMD=$(sed -n 's/^test_cmd=//p' .agent-review | head -n1)
+    TEST_CMD=$(sed -n 's/^test_cmd=//p' .tandem-review | head -n1)
 fi
 TEST_CMD="${TEST_CMD:-}"
 if [ -n "$TEST_CMD" ]; then
@@ -212,13 +212,13 @@ if [ -n "${PREV_RESPONSE:-}" ] &&
     fi
 fi
 ROUND="${ROUND:-1}"
-ARL_MAX_ROUNDS="${ARL_MAX_ROUNDS:-3}"
+TANDEM_MAX_ROUNDS="${TANDEM_MAX_ROUNDS:-3}"
 
 PROMPT="$(cat "$SKILL_DIR/templates/request.md")
 
 ## Review context
 
-- Round: $ROUND of at most $ARL_MAX_ROUNDS
+- Round: $ROUND of at most $TANDEM_MAX_ROUNDS
 - Base: \`$BASE\` ($BASE_SHA)
 - Snapshot of the working tree: tree $TREE
 - Get the diff with exactly: \`$DIFF_CMD\`
@@ -268,7 +268,7 @@ $(cat "$SKILL_DIR/templates/response.md")
 
 # --- dispatch ---------------------------------------------------------------
 
-ARL_TIMEOUT="${ARL_TIMEOUT:-1200}"
+TANDEM_TIMEOUT="${TANDEM_TIMEOUT:-1200}"
 
 # run_bounded <seconds> <cmd...> — run under a time limit. The command runs
 # in its own process group; on expiry the whole group gets TERM, then KILL
@@ -310,40 +310,40 @@ run_bounded() {
 }
 
 # Warn here, not in run_bounded: its stderr goes to the CLI log.
-if [ "$ARL_TIMEOUT" != "0" ] && ! command -v perl >/dev/null 2>&1; then
-    echo "Warning: perl not found — running the reviewer without a time limit (ARL_TIMEOUT ignored)." >&2
+if [ "$TANDEM_TIMEOUT" != "0" ] && ! command -v perl >/dev/null 2>&1; then
+    echo "Warning: perl not found — running the reviewer without a time limit (TANDEM_TIMEOUT ignored)." >&2
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/arl-run.XXXXXX")
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/tandem-run.XXXXXX")
 # The Codex reviewer's private temp directory, outside WORK so the reviewer
 # cannot see this run's files.
-REVIEWER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/arl-tmp.XXXXXX")
+REVIEWER_TMP=$(mktemp -d "${TMPDIR:-/tmp}/tandem-tmp.XXXXXX")
 trap 'rm -rf "$WORK" "$REVIEWER_TMP"' EXIT
 RESP="$WORK/response.md"
 CLI_LOG="$WORK/cli.log"
 : > "$RESP"
 
-# Exported for custom ARL_*_CMD wrappers.
-export ARL_BASE_SHA="$BASE_SHA" ARL_TREE="$TREE" ARL_TEST_CMD="$TEST_CMD"
+# Exported for custom TANDEM_*_CMD wrappers.
+export TANDEM_BASE_SHA="$BASE_SHA" TANDEM_TREE="$TREE" TANDEM_TEST_CMD="$TEST_CMD"
 
-# Extra CLI arguments (ARL_CLAUDE_ARGS / ARL_CODEX_ARGS). read -a splits on
+# Extra CLI arguments (TANDEM_CLAUDE_ARGS / TANDEM_CODEX_ARGS). read -a splits on
 # whitespace without globbing; it reads one line, so newlines become spaces
 # first. ${x[@]+...} because bash 3.2 (macOS) treats an empty array as unset
 # under set -u.
 extra=()
 case "$TARGET" in
-    claude) extra_args="${ARL_CLAUDE_ARGS:-}" ;;
-    codex)  extra_args="${ARL_CODEX_ARGS:-}" ;;
+    claude) extra_args="${TANDEM_CLAUDE_ARGS:-}" ;;
+    codex)  extra_args="${TANDEM_CODEX_ARGS:-}" ;;
 esac
 read -r -a extra <<< "${extra_args//$'\n'/ }"
 
 # For the default codex call, refuse arguments that replace the permission
 # profile: any sandbox mode makes codex exec ignore it without a word.
-if [ "$TARGET" = codex ] && [ -z "${ARL_CODEX_CMD:-}" ]; then
+if [ "$TARGET" = codex ] && [ -z "${TANDEM_CODEX_CMD:-}" ]; then
     for a in ${extra[@]+"${extra[@]}"}; do
         case "$a" in
             -s|-s*|--sandbox|--sandbox=*|*sandbox_mode*|*default_permissions*|*permissions.*|--full-auto|--dangerously-*)
-                echo "Error: ARL_CODEX_ARGS contains '$a', which would replace the reviewer's permission profile. Use codex_read / ARL_CODEX_READ to allow more directories." >&2
+                echo "Error: TANDEM_CODEX_ARGS contains '$a', which would replace the reviewer's permission profile. Use codex_read / TANDEM_CODEX_READ to allow more directories." >&2
                 exit 1 ;;
         esac
     done
@@ -384,17 +384,17 @@ codex_profile() {
     # A worktree's or submodule's git directory can live outside the repo.
     p=$(abs_path "$(git rev-parse --git-common-dir)")
     case "$p/" in "$TOP_ABS"/*) ;; *) [ -n "$p" ] && profile_add "$p" read ;; esac
-    # Extra directories from ARL_CODEX_READ and .agent-review.
+    # Extra directories from TANDEM_CODEX_READ and .tandem-review.
     local extra_read=()
-    if [ -n "${ARL_CODEX_READ:-}" ]; then
+    if [ -n "${TANDEM_CODEX_READ:-}" ]; then
         local IFS=:
         # shellcheck disable=SC2206
-        extra_read+=($ARL_CODEX_READ)
+        extra_read+=($TANDEM_CODEX_READ)
         unset IFS
     fi
-    if [ -f "$TOP/.agent-review" ]; then
+    if [ -f "$TOP/.tandem-review" ]; then
         while IFS= read -r p; do extra_read+=("$p"); done \
-            < <(sed -n 's/^codex_read=//p' "$TOP/.agent-review")
+            < <(sed -n 's/^codex_read=//p' "$TOP/.tandem-review")
     fi
     for p in ${extra_read[@]+"${extra_read[@]}"}; do
         case "$p" in \~/*) p="$HOME/${p#\~/}" ;; esac
@@ -422,9 +422,9 @@ rc=0
 STARTED=$SECONDS
 case "$TARGET" in
     claude)
-        if [ -n "${ARL_CLAUDE_CMD:-}" ]; then
+        if [ -n "${TANDEM_CLAUDE_CMD:-}" ]; then
             # shellcheck disable=SC2086
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CLAUDE_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
+            printf '%s\n' "$PROMPT" | run_bounded "$TANDEM_TIMEOUT" $TANDEM_CLAUDE_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
         else
             # --restricted confines file tools to the working directory and
             # removes code-running tools unless named; Bash is then limited
@@ -439,7 +439,7 @@ case "$TARGET" in
             [ -n "$TEST_CMD" ] && allowed+=("Bash($TEST_CMD)")
             # Extra arguments (model, effort) go before the restrictions;
             # they are not meant to loosen them.
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" claude -p \
+            printf '%s\n' "$PROMPT" | run_bounded "$TANDEM_TIMEOUT" claude -p \
                 ${extra[@]+"${extra[@]}"} \
                 --restricted --strict-mcp-config --no-session-persistence \
                 --permission-prompts none \
@@ -448,9 +448,9 @@ case "$TARGET" in
         fi
         ;;
     codex)
-        if [ -n "${ARL_CODEX_CMD:-}" ]; then
+        if [ -n "${TANDEM_CODEX_CMD:-}" ]; then
             # shellcheck disable=SC2086
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" $ARL_CODEX_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
+            printf '%s\n' "$PROMPT" | run_bounded "$TANDEM_TIMEOUT" $TANDEM_CODEX_CMD ${extra[@]+"${extra[@]}"} > "$RESP" 2> "$CLI_LOG" || rc=$?
         else
             # Permission profile (above) instead of -s; network stays off.
             # --ignore-user-config skips user MCP servers (extra tools, and
@@ -459,14 +459,14 @@ case "$TARGET" in
             # aborts on an unreadable one. -o captures the final message;
             # the session log goes to CLI_LOG.
             profile=$(codex_profile)
-            printf '%s\n' "$PROMPT" | run_bounded "$ARL_TIMEOUT" \
+            printf '%s\n' "$PROMPT" | run_bounded "$TANDEM_TIMEOUT" \
                 env GIT_CONFIG_GLOBAL=/dev/null TMPDIR="$REVIEWER_TMP" \
                 codex exec \
                 ${extra[@]+"${extra[@]}"} \
                 --ephemeral --ignore-user-config \
                 -c 'approval_policy="never"' \
-                -c 'default_permissions="arl_reviewer"' \
-                -c "permissions.arl_reviewer.filesystem=$profile" \
+                -c 'default_permissions="tandem_reviewer"' \
+                -c "permissions.tandem_reviewer.filesystem=$profile" \
                 -C "$TOP" -o "$RESP" - \
                 > "$CLI_LOG" 2>&1 || rc=$?
         fi
@@ -477,7 +477,7 @@ DURATION=$((SECONDS - STARTED))
 out=0
 if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 124 ]; then
-        echo "Error: $TARGET timed out after ${ARL_TIMEOUT}s (ARL_TIMEOUT)." >&2
+        echo "Error: $TARGET timed out after ${TANDEM_TIMEOUT}s (TANDEM_TIMEOUT)." >&2
         out=7
     else
         echo "Error: $TARGET exited with code $rc." >&2
@@ -606,7 +606,7 @@ record_round() {
     git diff "$BASE_SHA" "$TREE" > "$WORK/review.diff" &&
     printf 'target=%s\nround=%s\nbase=%s\nbase_sha=%s\ntree=%s\ntree_after=%s\nchanged=%s\nverdict=%s\nquestions=%s\nexit_code=%s\ncli_exit_code=%s\nduration_seconds=%s\n' \
         "$TARGET" "$ROUND" "$BASE" "$BASE_SHA" "$TREE" "$TREE_AFTER" "$CHANGED" "$VERDICT" "$QUESTIONS" "$out" "$rc" "$DURATION" > "$WORK/meta" &&
-    log_dir="${ARL_LOG_DIR:-$(git rev-parse --absolute-git-dir)/agent-review}" &&
+    log_dir="${TANDEM_LOG_DIR:-$(git rev-parse --absolute-git-dir)/tandem-review}" &&
     mkdir -p "$log_dir" &&
     run_log=$(mktemp -d "$log_dir/$(date +%Y%m%dT%H%M%S)-r$ROUND-$TARGET.XXXXXX") &&
     cp "$RESP" "$CLI_LOG" "$WORK/prompt.md" "$WORK/review.diff" "$WORK/meta" "$run_log/" || return 1
@@ -614,9 +614,9 @@ record_round() {
 }
 
 RECORDED=no
-if [ "${ARL_LOG:-1}" != "0" ]; then
+if [ "${TANDEM_LOG:-1}" != "0" ]; then
     if record_round; then RECORDED=yes; fi
-elif SAVED=$(mktemp "${TMPDIR:-/tmp}/arl-response.XXXXXX") && cp "$RESP" "$SAVED"; then
+elif SAVED=$(mktemp "${TMPDIR:-/tmp}/tandem-response.XXXXXX") && cp "$RESP" "$SAVED"; then
     RECORDED=yes
 fi
 if [ "$RECORDED" = no ]; then
@@ -626,5 +626,5 @@ if [ "$RECORDED" = no ]; then
 fi
 
 if [ "$rc" -eq 0 ]; then cat "$RESP"; fi
-echo "agent-review: verdict=$VERDICT questions=$QUESTIONS changed=$CHANGED response=$SAVED" >&2
+echo "tandem-review: verdict=$VERDICT questions=$QUESTIONS changed=$CHANGED response=$SAVED" >&2
 exit "$out"

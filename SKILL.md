@@ -1,9 +1,9 @@
 ---
-name: agent-review-loop
+name: tandem-review
 description: Have the other coding agent (Claude Code or Codex) review your current changes and iterate on its findings autonomously, only involving the human for real decisions or when the loop does not converge. Use when the user asks for a review by Claude/Codex, a second opinion from another agent, "let the other agent check this", a cross-agent or peer review, or before declaring a non-trivial change done when the user has asked for agent reviews.
 ---
 
-# Agent review loop
+# Tandem review
 
 You are the **implementer**. You made a change; another agent reviews it live
 in this repository, can read any file and run the configured test command.
@@ -26,19 +26,19 @@ FOCUS="What the reviewer should look at" \
 - `base-ref` defaults to `HEAD` = only uncommitted changes. Use `main` (or the
   branch point) when the change spans commits.
 - Test command: `TEST_CMD="npm test"`, or a `test_cmd=npm test` line in
-  `.agent-review` at the repo root. Without one, a Claude reviewer cannot run
+  `.tandem-review` at the repo root. Without one, a Claude reviewer cannot run
   tests at all, so set it whenever the project has tests.
 - Re-review rounds pass `PREV_RESPONSE=<path>`: the `response=` path of the
   most recent round with a valid verdict (exit 0/10/20/30), unchanged when
   retrying 6/7/8. The script refuses a recorded response without one. The
-  round number follows from it; set `ROUND=<n>` only with `ARL_LOG=0`.
+  round number follows from it; set `ROUND=<n>` only with `TANDEM_LOG=0`.
   After the human answered questions, add
   `HUMAN_ANSWERS="<their answers, verbatim>"`.
 - A Codex reviewer cannot read your home directory. If its tests fail for a
   missing toolchain (e.g. `node`/`python` not found), ask the human whether
-  to add the directory as a `codex_read=<dir>` line in `.agent-review` (or
-  `ARL_CODEX_READ`); do not add it on your own.
-- Model or effort: `ARL_CLAUDE_ARGS` / `ARL_CODEX_ARGS` (e.g. `--model
+  to add the directory as a `codex_read=<dir>` line in `.tandem-review` (or
+  `TANDEM_CODEX_READ`); do not add it on your own.
+- Model or effort: `TANDEM_CLAUDE_ARGS` / `TANDEM_CODEX_ARGS` (e.g. `--model
   opus`), only when the human asked for it, never to loosen restrictions.
 
 **A review takes minutes.** Run the command with a long tool timeout (≥ 20
@@ -53,11 +53,11 @@ The review is printed on stdout (empty on exits 7/8). The last stderr line
 is the status:
 
 ```
-agent-review: verdict=CONCERNS questions=0 changed=no response=<path>
+tandem-review: verdict=CONCERNS questions=0 changed=no response=<path>
 ```
 
 Every dispatched run is recorded; next to `response=` are `cli.log`,
-`prompt.md`, `review.diff` and `meta` (with `ARL_LOG=0` only the response). On exits 7/8 the status says
+`prompt.md`, `review.diff` and `meta` (with `TANDEM_LOG=0` only the response). On exits 7/8 the status says
 `verdict=TIMEOUT` / `CLI_FAILED`, and any partial response is not a verdict.
 
 ## What to do with the result
@@ -100,12 +100,12 @@ and do not reject a correct finding because the fix is inconvenient.
 
 Count the rounds: calls that returned a verdict (exits 0/10/20/30); retries
 and setup errors do not count. The round number is also in every recorded
-`meta` under `.git/agent-review/`.
+`meta` under `.git/tandem-review/`.
 
 Escalate to the human — stop and give a short list of the open points with
 both positions — when:
 
-1. you reach the round limit, `ARL_MAX_ROUNDS` (default **3**), without an
+1. you reach the round limit, `TANDEM_MAX_ROUNDS` (default **3**), without an
    APPROVE with `changed=no` or a CONCERNS round with `changed=no` that
    needed no further changes, or
 2. you and the reviewer disagree on the same finding twice: you rejected it

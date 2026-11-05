@@ -1,4 +1,4 @@
-# Working on agent-review-loop
+# Working on tandem-review
 
 This repository is a skill for Claude Code and Codex: one agent has the other
 review its working tree and iterates on the findings. `SKILL.md` is what an

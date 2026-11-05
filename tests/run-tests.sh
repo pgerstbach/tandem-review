@@ -11,7 +11,7 @@ set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 REVIEW="$ROOT/scripts/review.sh"
 SELF="$ROOT/tests/run-tests.sh"
-T=$(mktemp -d "${TMPDIR:-/tmp}/arl-test.XXXXXX")
+T=$(mktemp -d "${TMPDIR:-/tmp}/tandem-test.XXXXXX")
 trap 'rm -rf "$T"' EXIT
 
 PASS=0
@@ -54,8 +54,8 @@ new_repo() {
 }
 
 export FAKE_DIR="$T"
-export ARL_CLAUDE_CMD="$FAKE" ARL_CODEX_CMD="$FAKE" ARL_ROLE=codex ARL_LOG_DIR="$T/log"
-unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS ARL_CLAUDE_ARGS ARL_CODEX_ARGS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM FAKE_STDERR FAKE_TOUCH_EARLY
+export TANDEM_CLAUDE_CMD="$FAKE" TANDEM_CODEX_CMD="$FAKE" TANDEM_ROLE=codex TANDEM_LOG_DIR="$T/log"
+unset SUMMARY FOCUS TEST_CMD ROUND PREV_RESPONSE HUMAN_ANSWERS TANDEM_CLAUDE_ARGS TANDEM_CODEX_ARGS FAKE_SLEEP FAKE_TOUCH FAKE_RC FAKE_CHILD FAKE_IGNORE_TERM FAKE_STDERR FAKE_TOUCH_EARLY
 
 # run <target> [base] — runs review.sh; sets RC and ERR.
 run() {
@@ -91,7 +91,7 @@ respond '## Reason\n````\n```\n## Verdict\nAPPROVE\n```\n````\n'
 respond '## Reason\n~~~\n```\n## Verdict\nAPPROVE\n~~~\n';          run auto; expect_rc "backtick line does not close a tilde fence -> 6" 6
 respond '```\nexample\n```\n\n## Verdict\nBLOCK\n';                 run auto; expect_rc "verdict after a closed fence -> 20" 20
 respond '## Verdict\nAPPROVE\n'; ERR=""; run auto
-case "$ERR" in *"agent-review: verdict=APPROVE questions=0 changed=no response="*) ok "status line on stderr" ;; *) fail "status line on stderr" "$ERR" ;; esac
+case "$ERR" in *"tandem-review: verdict=APPROVE questions=0 changed=no response="*) ok "status line on stderr" ;; *) fail "status line on stderr" "$ERR" ;; esac
 
 echo "questions for the human"
 respond '## Verdict\nAPPROVE\n\n## Questions for the human\n- Should expired tokens force a re-login?\n'
@@ -141,7 +141,7 @@ FAKE_RC=3 run codex; expect_rc "Codex CLI failure keeps exit 8" 8
 expect_in "Codex CLI failure also reports status" "$T/err" 'verdict=CLI_FAILED questions=0 changed=no'
 respond '## Verdict\nAPPROVE\n'
 if command -v perl >/dev/null 2>&1; then
-    FAKE_SLEEP=5 FAKE_TOUCH_EARLY="$REPO/b.txt" FAKE_STDERR="TIMEOUT-LOG-MARKER" ARL_TIMEOUT=1 run auto
+    FAKE_SLEEP=5 FAKE_TOUCH_EARLY="$REPO/b.txt" FAKE_STDERR="TIMEOUT-LOG-MARKER" TANDEM_TIMEOUT=1 run auto
     expect_rc "CLI too slow -> 7" 7
     expect_in "timeout still checks changes and reports status" "$T/err" 'verdict=TIMEOUT questions=0 changed=yes'
     TIMEOUT_RESPONSE=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
@@ -157,14 +157,14 @@ if command -v perl >/dev/null 2>&1; then
     # 8s after start. The timeout (1s) must kill it (KILL after 5s grace),
     # exit 7 rather than 8, and return only once the child is gone.
     rm -f "$T/late"
-    FAKE_CHILD="$T/late" FAKE_SLEEP=20 ARL_TIMEOUT=1 run auto
+    FAKE_CHILD="$T/late" FAKE_SLEEP=20 TANDEM_TIMEOUT=1 run auto
     expect_rc "timeout with a TERM-ignoring child -> 7" 7
     sleep 9
     if [ ! -e "$T/late" ]; then ok "TERM-ignoring child killed before return"; else fail "TERM-ignoring child killed before return" "child wrote after the timeout"; fi
 
     # The reviewer itself ignores TERM and has to be KILLed: still exit 7
     # (GNU timeout would report 137, which looked like a CLI failure).
-    FAKE_IGNORE_TERM=1 FAKE_SLEEP=20 ARL_TIMEOUT=1 run auto
+    FAKE_IGNORE_TERM=1 FAKE_SLEEP=20 TANDEM_TIMEOUT=1 run auto
     expect_rc "timeout of a TERM-ignoring reviewer -> 7" 7
 
     # Without perl there is no time limit, with a warning.
@@ -178,7 +178,7 @@ if command -v perl >/dev/null 2>&1; then
         done
     done
     SAVED_PATH=$PATH; PATH="$NOPERL"
-    FAKE_SLEEP=2 ARL_TIMEOUT=1 run auto
+    FAKE_SLEEP=2 TANDEM_TIMEOUT=1 run auto
     PATH=$SAVED_PATH
     expect_rc "no perl -> runs without limit" 0
     case "$ERR" in *"perl not found"*) ok "no perl -> warns" ;; *) fail "no perl -> warns" "$ERR" ;; esac
@@ -211,19 +211,19 @@ expect_in "CLI and after-snapshot failure report uncertainty" "$T/err" 'verdict=
 rm -f "$T/fail-add"
 
 echo "targets and setup"
-ARL_ROLE=codex run auto; expect_rc "auto as codex runs" 0
-ARL_ROLE=claude ARL_CODEX_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude needs codex -> 2 when missing" 2
+TANDEM_ROLE=codex run auto; expect_rc "auto as codex runs" 0
+TANDEM_ROLE=claude TANDEM_CODEX_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude needs codex -> 2 when missing" 2
 EMPTY_BIN="$T/empty-bin"; mkdir -p "$EMPTY_BIN"
-ARL_CODEX_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run codex; expect_rc "codex CLI missing -> 2" 2
+TANDEM_CODEX_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run codex; expect_rc "codex CLI missing -> 2" 2
 case "$ERR" in *"Codex app is not enough"*"codex login status"*) ok "missing codex CLI explains how to install" ;; *) fail "missing codex CLI explains how to install" "$ERR" ;; esac
-ARL_CLAUDE_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run claude; expect_rc "claude CLI missing -> 2" 2
+TANDEM_CLAUDE_CMD='' PATH="$EMPTY_BIN:/usr/bin:/bin" run claude; expect_rc "claude CLI missing -> 2" 2
 case "$ERR" in *"Claude app is not enough"*) ok "missing claude CLI explains how to install" ;; *) fail "missing claude CLI explains how to install" "$ERR" ;; esac
-ARL_ROLE=claude ARL_CLAUDE_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude picks codex (claude CLI irrelevant)" 0
+TANDEM_ROLE=claude TANDEM_CLAUDE_CMD="$T/does-not-exist" run auto; expect_rc "auto as claude picks codex (claude CLI irrelevant)" 0
 case "$ERR" in *"-r1-codex."*) ok "auto as claude dispatched to codex" ;; *) fail "auto as claude dispatched to codex" "$ERR" ;; esac
-ARL_ROLE='' CLAUDECODE='' CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' CODEX_THREAD_ID='' \
+TANDEM_ROLE='' CLAUDECODE='' CODEX_SANDBOX='' CODEX_SANDBOX_NETWORK_DISABLED='' CODEX_THREAD_ID='' \
     CODEX_MANAGED_BY_NPM='' CODEX_MANAGED_BY_BUN='' CODEX_MANAGED_BY_PNPM='' run auto
 expect_rc "auto with unknown role -> 2" 2
-ARL_ROLE=claude run claude; expect_rc "explicit self-review runs" 0
+TANDEM_ROLE=claude run claude; expect_rc "explicit self-review runs" 0
 case "$ERR" in *"reviewing its own model"*) ok "self-review warns" ;; *) fail "self-review warns" ;; esac
 run gemini; expect_rc "unknown target -> 1" 1
 run; expect_rc "no target -> 1" 1
@@ -253,7 +253,7 @@ expect_in "committed change in stat" "$T/prompt.txt" "a.txt"
 
 echo "prompt contents"
 new_repo
-SUMMARY="Adds the second line" FOCUS="Check the newline" ROUND=2 ARL_MAX_ROUNDS=4 run auto
+SUMMARY="Adds the second line" FOCUS="Check the newline" ROUND=2 TANDEM_MAX_ROUNDS=4 run auto
 expect_in "summary in prompt" "$T/prompt.txt" "Adds the second line"
 expect_in "focus in prompt" "$T/prompt.txt" "Check the newline"
 expect_in "round in prompt" "$T/prompt.txt" "Round: 2 of at most 4"
@@ -261,10 +261,10 @@ expect_in "no test command noted" "$T/prompt.txt" "none configured"
 expect_in "response format embedded" "$T/prompt.txt" "## What I did NOT check"
 TEST_CMD="make check" run auto
 expect_in "TEST_CMD in prompt" "$T/prompt.txt" '`make check`'
-printf 'test_cmd=npm test\n' > .agent-review
-run auto; expect_in ".agent-review test_cmd used" "$T/prompt.txt" '`npm test`'
-TEST_CMD="pytest -q" run auto; expect_in "TEST_CMD overrides .agent-review" "$T/prompt.txt" '`pytest -q`'
-rm -f .agent-review
+printf 'test_cmd=npm test\n' > .tandem-review
+run auto; expect_in ".tandem-review test_cmd used" "$T/prompt.txt" '`npm test`'
+TEST_CMD="pytest -q" run auto; expect_in "TEST_CMD overrides .tandem-review" "$T/prompt.txt" '`pytest -q`'
+rm -f .tandem-review
 printf '## Verdict\nBLOCK\n\n## Findings\n- `a.txt:2` — PREVIOUS-MARKER\n' > "$T/prev.md"
 PREV_RESPONSE="$T/prev.md" HUMAN_ANSWERS="Yes, keep the old API." run auto
 expect_in "previous response in prompt" "$T/prompt.txt" "PREVIOUS-MARKER"
@@ -297,7 +297,7 @@ PREV_RESPONSE="$FAILED_RESP" run auto; expect_rc "recorded CLI_FAILED response r
 
 echo "extra CLI arguments"
 # Fake claude/codex in PATH that record their arguments, for the default
-# (non-ARL_*_CMD) invocations.
+# (non-TANDEM_*_CMD) invocations.
 ARGS_BIN="$T/args-bin"; mkdir -p "$ARGS_BIN"
 for cli in claude codex; do
     cat > "$ARGS_BIN/$cli" <<'EOF'
@@ -312,24 +312,24 @@ EOF
     chmod +x "$ARGS_BIN/$cli"
 done
 respond '## Verdict\nAPPROVE\n'
-ARL_CODEX_CMD='' ARL_CODEX_ARGS="-m test-model  -c model_reasoning_effort=high" PATH="$ARGS_BIN:$PATH" run codex
+TANDEM_CODEX_CMD='' TANDEM_CODEX_ARGS="-m test-model  -c model_reasoning_effort=high" PATH="$ARGS_BIN:$PATH" run codex
 expect_rc "codex with extra args -> 0" 0
 expect_in "codex gets extra args" "$T/args.txt" "test-model"
 expect_in "codex extra args split on whitespace" "$T/args.txt" "model_reasoning_effort=high"
-expect_in "codex keeps its permission profile" "$T/args.txt" 'default_permissions="arl_reviewer"'
+expect_in "codex keeps its permission profile" "$T/args.txt" 'default_permissions="tandem_reviewer"'
 expect_in "codex keeps --ignore-user-config" "$T/args.txt" "--ignore-user-config"
-ARL_CLAUDE_CMD='' ARL_CLAUDE_ARGS="--model test-model" PATH="$ARGS_BIN:$PATH" run claude
+TANDEM_CLAUDE_CMD='' TANDEM_CLAUDE_ARGS="--model test-model" PATH="$ARGS_BIN:$PATH" run claude
 expect_rc "claude with extra args -> 0" 0
 expect_in "claude gets extra args" "$T/args.txt" "test-model"
 expect_in "claude keeps --restricted" "$T/args.txt" "--restricted"
 expect_in "claude keeps --strict-mcp-config" "$T/args.txt" "--strict-mcp-config"
-ARL_CLAUDE_CMD='' PATH="$ARGS_BIN:$PATH" run claude
+TANDEM_CLAUDE_CMD='' PATH="$ARGS_BIN:$PATH" run claude
 expect_rc "claude without extra args (empty array, bash 3.2) -> 0" 0
-ARL_CODEX_CMD='' ARL_CODEX_ARGS=$'-m test-model\n-c second-line-arg' PATH="$ARGS_BIN:$PATH" run codex
+TANDEM_CODEX_CMD='' TANDEM_CODEX_ARGS=$'-m test-model\n-c second-line-arg' PATH="$ARGS_BIN:$PATH" run codex
 expect_in "multiline extra args: all lines used" "$T/args.txt" "second-line-arg"
-ARL_CODEX_ARGS="--marker-arg" ARL_CODEX_CMD="$ARGS_BIN/codex" run codex
-expect_in "extra args appended to ARL_CODEX_CMD" "$T/args.txt" "--marker-arg"
-ARL_CLAUDE_ARGS="*" ARL_CLAUDE_CMD="$ARGS_BIN/claude" run claude
+TANDEM_CODEX_ARGS="--marker-arg" TANDEM_CODEX_CMD="$ARGS_BIN/codex" run codex
+expect_in "extra args appended to TANDEM_CODEX_CMD" "$T/args.txt" "--marker-arg"
+TANDEM_CLAUDE_ARGS="*" TANDEM_CLAUDE_CMD="$ARGS_BIN/claude" run claude
 if [ "$(cat "$T/args.txt")" = "*" ]; then ok "extra args are not globbed"; else fail "extra args are not globbed" "$(cat "$T/args.txt")"; fi
 
 echo "recording and change detection"
@@ -352,20 +352,20 @@ P2=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
 if [ "$P1" != "$P2" ] && grep -q FIRST "$P1" && grep -q SECOND "$P2"; then
     ok "same round twice in a row keeps both records"; else fail "same round twice in a row keeps both records" "$P1 / $P2"; fi
 respond '## Verdict\nAPPROVE\n'
-ARL_LOG=0 ARL_LOG_DIR="$T/nolog" run auto
-if [ ! -d "$T/nolog" ]; then ok "ARL_LOG=0 records nothing"; else fail "ARL_LOG=0 records nothing"; fi
+TANDEM_LOG=0 TANDEM_LOG_DIR="$T/nolog" run auto
+if [ ! -d "$T/nolog" ]; then ok "TANDEM_LOG=0 records nothing"; else fail "TANDEM_LOG=0 records nothing"; fi
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
-if [ -f "$RESP_PATH" ]; then ok "ARL_LOG=0 still keeps the response for PREV_RESPONSE"; rm -f "$RESP_PATH"; else fail "ARL_LOG=0 still keeps the response"; fi
-FAKE_RC=3 ARL_LOG=0 ARL_LOG_DIR="$T/nolog" run auto
-expect_rc "ARL_LOG=0 also preserves CLI failure exit" 8
-if [ ! -d "$T/nolog" ]; then ok "ARL_LOG=0 disables failed-round records too"; else fail "ARL_LOG=0 disables failed-round records too"; fi
+if [ -f "$RESP_PATH" ]; then ok "TANDEM_LOG=0 still keeps the response for PREV_RESPONSE"; rm -f "$RESP_PATH"; else fail "TANDEM_LOG=0 still keeps the response"; fi
+FAKE_RC=3 TANDEM_LOG=0 TANDEM_LOG_DIR="$T/nolog" run auto
+expect_rc "TANDEM_LOG=0 also preserves CLI failure exit" 8
+if [ ! -d "$T/nolog" ]; then ok "TANDEM_LOG=0 disables failed-round records too"; else fail "TANDEM_LOG=0 disables failed-round records too"; fi
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
-if [ -f "$RESP_PATH" ]; then ok "ARL_LOG=0 keeps failed response too"; rm -f "$RESP_PATH"; else fail "ARL_LOG=0 keeps failed response too"; fi
+if [ -f "$RESP_PATH" ]; then ok "TANDEM_LOG=0 keeps failed response too"; rm -f "$RESP_PATH"; else fail "TANDEM_LOG=0 keeps failed response too"; fi
 
 # A recording failure must not mask the review/CLI result or delete diagnostics.
 printf 'not a directory\n' > "$T/blocked-log"
 mkdir -p "$T/recording-tmp"
-FAKE_RC=3 ARL_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
+FAKE_RC=3 TANDEM_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
 expect_rc "log directory failure preserves CLI exit 8" 8
 expect_in "log directory failure warns" "$T/err" 'could not save review records'
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
@@ -373,7 +373,7 @@ FALLBACK_DIR=$(dirname "${RESP_PATH:-$T/missing/response.md}")
 for f in response.md cli.log prompt.md review.diff meta; do
     if [ -f "$FALLBACK_DIR/$f" ]; then ok "recording failure retains $f"; else fail "recording failure retains $f"; fi
 done
-ARL_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
+TANDEM_LOG_DIR="$T/blocked-log" TMPDIR="$T/recording-tmp" run auto
 expect_rc "log directory failure preserves APPROVE exit 0" 0
 
 # Also retain temporary output when the response-only save cannot be created.
@@ -381,11 +381,11 @@ REAL_MKTEMP=$(command -v mktemp)
 mkdir -p "$T/mktemp-shim"
 cat > "$T/mktemp-shim/mktemp" <<EOF
 #!/usr/bin/env bash
-case "\$*" in *arl-response.*) exit 1 ;; esac
+case "\$*" in *tandem-response.*) exit 1 ;; esac
 exec "$REAL_MKTEMP" "\$@"
 EOF
 chmod +x "$T/mktemp-shim/mktemp"
-FAKE_RC=3 ARL_LOG=0 PATH="$T/mktemp-shim:$PATH" TMPDIR="$T/recording-tmp" run auto
+FAKE_RC=3 TANDEM_LOG=0 PATH="$T/mktemp-shim:$PATH" TMPDIR="$T/recording-tmp" run auto
 expect_rc "response-only save failure preserves CLI exit 8" 8
 expect_in "response-only save failure warns" "$T/err" 'could not save review records'
 RESP_PATH=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
@@ -396,7 +396,7 @@ case "$ERR" in *"changed=yes"*) ok "modification during review detected" ;; *) f
 expect_rc "verdict exit kept despite change" 0
 
 echo "codex permission profile"
-# A fake `codex` on PATH stands in for the default call (no ARL_CODEX_CMD):
+# A fake `codex` on PATH stands in for the default call (no TANDEM_CODEX_CMD):
 # it records its arguments and environment and answers via -o.
 FAKEBIN="$T/fakebin"; mkdir -p "$FAKEBIN"
 cat > "$FAKEBIN/codex" <<'EOF'
@@ -411,8 +411,8 @@ done
 EOF
 chmod +x "$FAKEBIN/codex"
 # run_codex — default codex call through the fake.
-run_codex() { ARL_CODEX_CMD='' PATH="$FAKEBIN:$PATH" run codex; }
-profile() { sed -n 's/^permissions\.arl_reviewer\.filesystem=//p' "$T/codex-args.txt"; }
+run_codex() { TANDEM_CODEX_CMD='' PATH="$FAKEBIN:$PATH" run codex; }
+profile() { sed -n 's/^permissions\.tandem_reviewer\.filesystem=//p' "$T/codex-args.txt"; }
 expect_profile() { # <name> <fixed string>
     if profile | grep -qF -- "$2"; then ok "$1"; else fail "$1" "'$2' not in $(profile)"; fi
 }
@@ -422,7 +422,7 @@ TOP_ABS=$(pwd -P)
 run_codex; expect_rc "default codex call runs" 0
 if grep -qxE -- '-s|--sandbox|workspace-write' "$T/codex-args.txt"; then
     fail "no -s (it would silently disable the profile)"; else ok "no -s (it would silently disable the profile)"; fi
-expect_in "profile selected" "$T/codex-args.txt" 'default_permissions="arl_reviewer"'
+expect_in "profile selected" "$T/codex-args.txt" 'default_permissions="tandem_reviewer"'
 expect_in "approval policy never" "$T/codex-args.txt" 'approval_policy="never"'
 expect_in "user config ignored" "$T/codex-args.txt" '--ignore-user-config'
 expect_profile ":minimal readable" '":minimal"="read"'
@@ -438,32 +438,32 @@ if profile | grep -qF "$HOME\""; then fail "home directory not in profile"; else
 for bad in "-s danger-full-access" "--sandbox=workspace-write" "-c sandbox_mode=danger-full-access" \
            "-c default_permissions=x" "--dangerously-bypass-approvals-and-sandbox" "--full-auto"; do
     rm -f "$T/codex-args.txt"
-    ARL_CODEX_ARGS="$bad" run_codex
-    if [ "$RC" -eq 1 ] && [ ! -e "$T/codex-args.txt" ]; then ok "ARL_CODEX_ARGS '$bad' refused"
-    else fail "ARL_CODEX_ARGS '$bad' refused" "exit $RC"; fi
+    TANDEM_CODEX_ARGS="$bad" run_codex
+    if [ "$RC" -eq 1 ] && [ ! -e "$T/codex-args.txt" ]; then ok "TANDEM_CODEX_ARGS '$bad' refused"
+    else fail "TANDEM_CODEX_ARGS '$bad' refused" "exit $RC"; fi
 done
-ARL_CODEX_ARGS="-m some-model -c model_reasoning_effort=high" run_codex
-expect_rc "harmless ARL_CODEX_ARGS still allowed" 0
+TANDEM_CODEX_ARGS="-m some-model -c model_reasoning_effort=high" run_codex
+expect_rc "harmless TANDEM_CODEX_ARGS still allowed" 0
 
 mkdir -p "$T/tools one" "$T/tools2" "$T/home/.nvm" "$T/quo\"te"
 # The script writes resolved paths (on macOS $TMPDIR is under the /var
 # symlink and ends in a slash).
 TR=$(cd "$T" && pwd -P)
-ARL_CODEX_READ="$T/tools one:$T/tools2:$T/quo\"te" run_codex
-expect_profile "ARL_CODEX_READ dir with space" "\"$TR/tools one\"=\"read\""
-expect_profile "ARL_CODEX_READ second dir" "\"$TR/tools2\"=\"read\""
+TANDEM_CODEX_READ="$T/tools one:$T/tools2:$T/quo\"te" run_codex
+expect_profile "TANDEM_CODEX_READ dir with space" "\"$TR/tools one\"=\"read\""
+expect_profile "TANDEM_CODEX_READ second dir" "\"$TR/tools2\"=\"read\""
 expect_profile "quote in path escaped for TOML" "\"$TR/quo\\\"te\"=\"read\""
-printf 'test_cmd=./t.sh\ncodex_read=~/.nvm\ncodex_read=%s/missing\n' "$T" > .agent-review
+printf 'test_cmd=./t.sh\ncodex_read=~/.nvm\ncodex_read=%s/missing\n' "$T" > .tandem-review
 HOME="$T/home" run_codex
-expect_profile "codex_read with ~/ from .agent-review" "\"$TR/home/.nvm\"=\"read\""
+expect_profile "codex_read with ~/ from .tandem-review" "\"$TR/home/.nvm\"=\"read\""
 case "$ERR" in *"codex_read path"*"missing"*"skipped"*) ok "missing codex_read path warned and skipped" ;; *) fail "missing codex_read path warned and skipped" "$ERR" ;; esac
 if profile | grep -qF "/missing\""; then fail "missing path not in profile"; else ok "missing path not in profile"; fi
-rm -f .agent-review
+rm -f .tandem-review
 
 # A linked worktree keeps its git directory in the main repository.
 git add -A && git commit -qm wip2
 git worktree add -q "$T/wt" 2>/dev/null
-(cd "$T/wt" && printf 'wt change\n' >> a.txt && ARL_CODEX_CMD='' PATH="$FAKEBIN:$PATH" "$REVIEW" codex >/dev/null 2>&1)
+(cd "$T/wt" && printf 'wt change\n' >> a.txt && TANDEM_CODEX_CMD='' PATH="$FAKEBIN:$PATH" "$REVIEW" codex >/dev/null 2>&1)
 RC=$?; expect_rc "review in a linked worktree" 0
 expect_profile "main repo's git dir readable from a worktree" "\"$TOP_ABS/.git\"=\"read\""
 
