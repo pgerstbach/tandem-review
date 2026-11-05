@@ -456,11 +456,15 @@ case "$TARGET" in
             # --ignore-user-config skips user MCP servers (extra tools, and
             # they can hang non-interactive runs). GIT_CONFIG_GLOBAL: the
             # user's ~/.gitconfig is unreadable in the sandbox, and git
-            # aborts on an unreadable one. -o captures the final message;
-            # the session log goes to CLI_LOG.
+            # aborts on an unreadable one. CLANG_MODULE_CACHE_PATH: clang
+            # and swift ignore TMPDIR and write their module cache to the
+            # per-user cache directory (/var/folders/…/C on macOS), which
+            # the profile denies; without a cache, Swift cannot compile.
+            # -o captures the final message; the session log goes to CLI_LOG.
             profile=$(codex_profile)
             printf '%s\n' "$PROMPT" | run_bounded "$TANDEM_TIMEOUT" \
                 env GIT_CONFIG_GLOBAL=/dev/null TMPDIR="$REVIEWER_TMP" \
+                CLANG_MODULE_CACHE_PATH="$REVIEWER_TMP/clang-module-cache" \
                 codex exec \
                 ${extra[@]+"${extra[@]}"} \
                 --ephemeral --ignore-user-config \

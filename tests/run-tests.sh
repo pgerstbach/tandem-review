@@ -402,7 +402,7 @@ FAKEBIN="$T/fakebin"; mkdir -p "$FAKEBIN"
 cat > "$FAKEBIN/codex" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" > "$FAKE_DIR/codex-args.txt"
-printf 'GIT_CONFIG_GLOBAL=%s\nTMPDIR=%s\n' "${GIT_CONFIG_GLOBAL:-}" "${TMPDIR:-}" > "$FAKE_DIR/codex-env.txt"
+printf 'GIT_CONFIG_GLOBAL=%s\nTMPDIR=%s\nCLANG_MODULE_CACHE_PATH=%s\n' "${GIT_CONFIG_GLOBAL:-}" "${TMPDIR:-}" "${CLANG_MODULE_CACHE_PATH:-}" > "$FAKE_DIR/codex-env.txt"
 cat > /dev/null
 while [ $# -gt 0 ]; do
     if [ "$1" = -o ]; then printf '## Verdict\nAPPROVE\n' > "$2"; fi
@@ -433,6 +433,8 @@ if [ -n "$RTMP" ] && [ "$RTMP" != /tmp ] && profile | grep -qF "$(cd "$(dirname 
     ok "private TMPDIR, writable"; else fail "private TMPDIR, writable" "TMPDIR=$RTMP; $(profile)"; fi
 if [ -n "$RTMP" ] && [ ! -e "$RTMP" ]; then ok "private TMPDIR removed afterwards"; else fail "private TMPDIR removed afterwards" "$RTMP"; fi
 expect_in "GIT_CONFIG_GLOBAL=/dev/null" "$T/codex-env.txt" "GIT_CONFIG_GLOBAL=/dev/null"
+CMC=$(sed -n 's/^CLANG_MODULE_CACHE_PATH=//p' "$T/codex-env.txt")
+case "$CMC" in "$RTMP"/*) ok "clang module cache inside the private TMPDIR" ;; *) fail "clang module cache inside the private TMPDIR" "CLANG_MODULE_CACHE_PATH=$CMC TMPDIR=$RTMP" ;; esac
 if profile | grep -qF "$HOME\""; then fail "home directory not in profile"; else ok "home directory not in profile"; fi
 
 for bad in "-s danger-full-access" "--sandbox=workspace-write" "-c sandbox_mode=danger-full-access" \

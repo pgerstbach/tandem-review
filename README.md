@@ -215,6 +215,12 @@ tests.
 
 - A review takes minutes. The implementing agent has to call the script with
   a long tool timeout or in the background; the skill tells it to.
+- A Codex reviewer can only write to the repository and its private temp
+  directory. Tools that ignore `TMPDIR` and write to fixed per-user caches
+  can fail there. The clang/Swift module cache is redirected
+  (`CLANG_MODULE_CACHE_PATH`) and rebuilt each round, so Swift builds are
+  slower; warnings about the SwiftPM or `xcrun` caches are harmless. If
+  another tool fails this way, please open an issue.
 - A Codex implementer must run the script outside its own sandbox, because
   the Claude CLI needs network access. Codex asks you for that permission.
 - Without `perl` there is no time limit (the script warns).
