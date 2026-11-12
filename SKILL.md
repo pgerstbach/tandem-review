@@ -1,12 +1,13 @@
 ---
 name: tandem-review
-description: Have the other coding agent (Claude Code or Codex) review your current changes and iterate on its findings autonomously, only involving the human for real decisions or when the loop does not converge. Use when the user asks for a "tandem review" (e.g. "make a tandem review", "tandem-review this"), a review by Claude/Codex, a second opinion from another agent, "let the other agent check this", a cross-agent or peer review, or before declaring a non-trivial change done when the user has asked for agent reviews.
+description: Have the other coding agent (Claude Code, Codex or Mistral Vibe) review your current changes and iterate on its findings autonomously, only involving the human for real decisions or when the loop does not converge. Use when the user asks for a "tandem review" (e.g. "make a tandem review", "tandem-review this"), a review by Claude/Codex, a second opinion from another agent, "let the other agent check this", a cross-agent or peer review, or before declaring a non-trivial change done when the user has asked for agent reviews.
 ---
 
 # Tandem review
 
 You are the **implementer**. You made a change; another agent reviews it live
-in this repository, can read any file and run the configured test command.
+in this repository and can read files. Claude and Codex can also run the
+configured test command; for Vibe the script runs it and supplies the result.
 You fix what is right, reject what is wrong with a reason, and repeat until
 the review is clean — without bothering the human unless it is needed.
 
@@ -21,8 +22,13 @@ FOCUS="What the reviewer should look at" \
 ```
 
 - `auto` picks the other agent (Claude → Codex, Codex → Claude). Name
-  `claude` or `codex` to choose; reviewing with your own model works but
+  `claude`, `codex` or `vibe` to choose; reviewing with your own model works but
   says so in a warning, and you must tell the human.
+- Vibe implementer: use `TANDEM_ROLE=vibe` with `auto` (which selects Claude),
+  or name the reviewer explicitly. Choose `vibe` explicitly to review with
+  Mistral Vibe. The Vibe reviewer receives the diff on stdin and can read
+  files, but cannot run commands. The script runs a configured test command
+  and includes its exit code and last 200 output lines in the review prompt.
 - `base-ref` defaults to `HEAD` = only uncommitted changes. Use `main` (or the
   branch point) when the change spans commits.
 - Test command: `TEST_CMD="npm test"`, or a `test_cmd=npm test` line in

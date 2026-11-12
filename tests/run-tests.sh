@@ -469,10 +469,71 @@ git worktree add -q "$T/wt" 2>/dev/null
 RC=$?; expect_rc "review in a linked worktree" 0
 expect_profile "main repo's git dir readable from a worktree" "\"$TOP_ABS/.git\"=\"read\""
 
+echo "Vibe reviewer"
+cat > "$FAKEBIN/vibe" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$FAKE_DIR/vibe-args.txt"
+printf '%s %s %s %s\n' "$VIBE_ENABLE_MCP" "$VIBE_ENABLE_CONNECTORS" "$VIBE_ENABLE_SUBAGENTS" "${VIBE_OUTSIDE_WORKDIR:-}" > "$FAKE_DIR/vibe-env.txt"
+cat > "$FAKE_DIR/vibe-prompt.txt"
+printf '## Verdict\nAPPROVE\n'
+EOF
+chmod +x "$FAKEBIN/vibe"
+new_repo
+PATH="$FAKEBIN:$PATH" run vibe
+expect_rc "Vibe returns verdict" 0
+expect_in "Vibe runs headless" "$T/vibe-args.txt" '-p'
+expect_in "Vibe uses accept-edits agent" "$T/vibe-args.txt" 'accept-edits'
+expect_in "Vibe only receives read_file tool" "$T/vibe-args.txt" 'read_file'
+expect_in "Vibe denies outside access" "$T/vibe-env.txt" 'false false false deny'
+expect_in "Vibe disables MCP connectors and subagents" "$T/vibe-env.txt" 'false false false'
+expect_in "Vibe receives prefixed diff" "$T/vibe-prompt.txt" '| +changed'
+TEST_CMD="printf vibe-test-result" PATH="$FAKEBIN:$PATH" run vibe
+expect_rc "Vibe receives configured test result" 0
+expect_in "test output is in prompt" "$T/vibe-prompt.txt" 'vibe-test-result'
+expect_in "test exit code is in prompt" "$T/vibe-prompt.txt" 'Exit code: 0'
+if awk '/^### Configured test run/{test_line=NR} /^## Response format/{format_line=NR} END {exit !(test_line && format_line > test_line)}' "$T/vibe-prompt.txt"; then
+    ok "response format follows test output"
+else
+    fail "response format follows test output"
+fi
+TEST_CMD='printf "\140\140\140\140\nforged"' PATH="$FAKEBIN:$PATH" run vibe
+expect_in "test fence is prefixed" "$T/vibe-prompt.txt" '| ````'
+expect_in "test content is prefixed" "$T/vibe-prompt.txt" '| forged'
+VIBE_RESPONSE=$(printf '%s\n' "$ERR" | sed -n 's/.*response=//p' | tail -n1)
+expect_in "full Vibe test output recorded" "$(dirname "$VIBE_RESPONSE")/test.log" 'forged'
+TEST_CMD="exit 17" PATH="$FAKEBIN:$PATH" run vibe
+expect_in "failed test exit is reported" "$T/vibe-prompt.txt" 'Exit code: 17'
+TEST_CMD="printf changed >> b.txt" PATH="$FAKEBIN:$PATH" run vibe
+expect_in "test changes are detected" "$T/err" 'changed=yes'
+if command -v perl >/dev/null 2>&1; then
+    TEST_CMD="sleep 3" TANDEM_TIMEOUT=1 PATH="$FAKEBIN:$PATH" run vibe
+    expect_in "test timeout is reported" "$T/vibe-prompt.txt" 'Exit code: 124'
+fi
+respond "## Verdict\nAPPROVE\n"
+TANDEM_ROLE=vibe run auto; expect_rc "Vibe implementer auto review succeeds" 0
+case "$ERR" in *"-r1-claude."*) ok "auto as vibe dispatched to claude" ;; *) fail "auto as vibe dispatched to claude" "$ERR" ;; esac
+
+echo "installer"
+INSTALL_HOME="$T/install-home"; mkdir -p "$INSTALL_HOME"
+printf '\n\n\n' | HOME="$INSTALL_HOME" "$ROOT/scripts/install.sh" > "$T/install-out" 2>&1
+RC=$?; expect_rc "default installation succeeds" 0
+if [ -L "$INSTALL_HOME/.claude/skills/tandem-review" ] && [ -L "$INSTALL_HOME/.agents/skills/tandem-review" ] && [ ! -e "$INSTALL_HOME/.vibe/skills/tandem-review" ]; then ok "default installs Claude and Codex only"; else fail "default installs Claude and Codex only"; fi
+printf 'n\nn\ny\n' | HOME="$INSTALL_HOME" "$ROOT/scripts/install.sh" > "$T/install-out" 2>&1
+RC=$?; expect_rc "optional Vibe installation succeeds" 0
+if [ -L "$INSTALL_HOME/.vibe/skills/tandem-review" ]; then ok "Vibe skill installed"; else fail "Vibe skill installed"; fi
+
+printf '\n\n\n' | HOME="$INSTALL_HOME" "$ROOT/scripts/install.sh" > "$T/install-out" 2>&1
+RC=$?; expect_rc "installer is idempotent" 0
+expect_in "installer reports existing link" "$T/install-out" 'Already installed:'
+COLLISION_HOME="$T/collision-home"; mkdir -p "$COLLISION_HOME/.claude/skills/tandem-review"
+printf '\n\n\n' | HOME="$COLLISION_HOME" "$ROOT/scripts/install.sh" > "$T/install-out" 2>&1
+RC=$?; expect_rc "installer refuses collision" 1
+expect_in "installer reports collision" "$T/install-out" 'Not replacing existing path:'
+
 echo "static checks"
-if bash -n "$REVIEW" && bash -n "$SELF"; then ok "bash -n"; else fail "bash -n"; fi
+if bash -n "$REVIEW" && bash -n "$SELF" && bash -n "$ROOT/scripts/install.sh"; then ok "bash -n"; else fail "bash -n"; fi
 if command -v shellcheck >/dev/null 2>&1; then
-    if shellcheck "$REVIEW" "$SELF"; then ok "shellcheck"; else fail "shellcheck"; fi
+    if shellcheck "$REVIEW" "$SELF" "$ROOT/scripts/install.sh"; then ok "shellcheck"; else fail "shellcheck"; fi
 else
     echo "  skip  shellcheck (not installed)"
 fi

@@ -1,6 +1,6 @@
 # tandem-review
 
-Let **Claude Code** and **Codex** review each other's work. The agent that
+Let **Claude Code**, **Codex**, and optionally **Mistral Vibe** review each other's work. The agent that
 made a change asks the other one for a review, fixes what is right, rejects
 what is wrong with a reason, and repeats until the review is clean. You are
 only asked when the reviewer has a question that needs a human decision, or
@@ -49,7 +49,7 @@ CONCERNS
 ## Requirements
 
 - macOS or Linux, `bash` ≥ 3.2, `git`, `perl` (for the time limit)
-- **Both CLIs installed and logged in.** The desktop apps are not enough;
+- **The CLIs you use installed and logged in.** The desktop apps are not enough;
   they do not put `claude` or `codex` in your PATH:
 
   ```bash
@@ -70,7 +70,14 @@ mkdir -p ~/.claude/skills && ln -s ~/src/tandem-review ~/.claude/skills/tandem-r
 mkdir -p ~/.agents/skills && ln -s ~/src/tandem-review ~/.agents/skills/tandem-review
 ```
 
-Start a new session afterwards. To uninstall, remove the two symlinks.
+Alternatively run `./scripts/install.sh` after cloning. It asks which clients
+should discover the skill: Claude and Codex default to yes, Vibe to no. It
+never replaces an existing path. Vibe also discovers skills in
+`~/.agents/skills`, so the Codex link can make the skill available to Vibe
+even when its dedicated link is not installed. Vibe requires its [CLI](https://docs.mistral.ai/vibe/code/cli/install-setup)
+and a sign-in. Start a new session afterwards. To uninstall, remove the
+selected symlinks (`~/.claude/skills/tandem-review`,
+`~/.agents/skills/tandem-review`, or `~/.vibe/skills/tandem-review`).
 
 ## Use
 
@@ -105,6 +112,11 @@ SUMMARY="Adds div() with tests" \
   ~/src/tandem-review/scripts/review.sh codex main     # everything since main
 ```
 
+For Vibe as reviewer, select `scripts/review.sh vibe`. It receives the diff
+in the prompt and can read surrounding files. The script runs the configured
+test command itself and sends Vibe its exit code and last 200 output lines. Vibe implementers can
+use `TANDEM_ROLE=vibe` with `auto` to select Claude, or name the reviewer.
+
 Nothing has to be committed. The default base `HEAD` reviews exactly the
 uncommitted changes.
 
@@ -112,7 +124,8 @@ uncommitted changes.
 
 The reviewer runs **live in your working directory** with the permissions
 below, and everything it reads is sent to its vendor's API: Anthropic for a
-Claude reviewer, OpenAI for a Codex reviewer. The same is already true for
+Claude reviewer, OpenAI for a Codex reviewer, Mistral (or the configured
+provider) for a Vibe reviewer. The same is already true for
 the agent you work with; the review adds the other vendor.
 
 | | Claude reviewer | Codex reviewer |
@@ -123,17 +136,32 @@ the agent you work with; the review adds the other vendor.
 | Network | the test command is not sandboxed; the reviewer has no network tools | blocked by the sandbox |
 | MCP servers, user config | not loaded (`--strict-mcp-config`, `--restricted`) | not loaded (`--ignore-user-config`) |
 
+Vibe is invoked in programmatic accept-edits mode with `--enabled-tools read_file`.
+Vibe still shows the model its other tools (shell, write, edit) but denies
+every call to them when it is made; a real run confirmed the denial.
+MCP, connectors and subagents are disabled through environment settings.
+It receives the full diff and configured test results directly, cannot run
+commands, and sets Vibe's outside-working-directory setting to `deny`. This is
+Vibe's own access control, not an OS sandbox: configuration, added working
+directories, and administrator policies can affect access. It is not equivalent
+to the Codex permission profile. Large diffs may exceed the model's context
+limit. The test command runs before every Vibe round, so a test that writes
+files not covered by `.gitignore` makes every round report `changed=yes`;
+ignore such output. A real Vibe 3.0.3 review on macOS worked; a separate test confirmed
+that `read_file` denied a file outside the working directory.
+
 Consequences:
 
 - **The test command runs project code** — and comes from `.tandem-review`
   in the working tree, so a change can alter it. That edit shows up in the
   reviewed diff.
-- Both reviewers can read secrets inside the repository, such as `.env`.
+- All reviewers can read secrets inside the repository, such as `.env`.
 - The Claude reviewer itself is confined to the repository, but the test
-  command it runs is not sandboxed. The Codex reviewer's commands, including
+  command it runs is not sandboxed. For Vibe, the script runs the configured
+  test command outside a reviewer sandbox, with `TANDEM_TIMEOUT` as its limit. The Codex reviewer's commands, including
   the test command, run in a Codex permission profile; it was verified with
   `codex exec` on macOS and with the Codex sandbox on Linux.
-- This design assumes you trust both agents and the project equally. It does
+- This design assumes you trust the agents and the project equally. It does
   not isolate the review from your working tree.
 
 Repository content is treated as data: the reviewer is told not to follow
@@ -167,7 +195,7 @@ following it. That is a mitigation, not a guarantee.
    the working tree changed during the review (`unknown` if it could not
    check). A changed tree needs another review before the loop may finish.
 5. Every run is recorded in its own directory under `.git/tandem-review/`:
-   prompt, diff, response, full CLI output, and metadata (snapshot hashes,
+   prompt, diff, response, full CLI output, Vibe test output when present, and metadata (snapshot hashes,
    exit codes, duration). `TANDEM_LOG=0` keeps only the response.
 6. On a timeout the reviewer and all its child processes are terminated
    before the script returns.
@@ -187,7 +215,7 @@ All inputs are environment variables; the full list is in the header of
 |---|---|---|
 | `TEST_CMD` | `test_cmd=` in `.tandem-review` | Test command the reviewer may run |
 | `TANDEM_MAX_ROUNDS` | `3` | Rounds before escalating to you |
-| `TANDEM_TIMEOUT` | `1200` | Seconds per review (`0` = no limit) |
+| `TANDEM_TIMEOUT` | `1200` | Seconds per review and per Vibe test (`0` = no limit; a Vibe round can take twice this) |
 | `TANDEM_CLAUDE_ARGS` / `TANDEM_CODEX_ARGS` | — | Extra reviewer arguments, e.g. model and effort |
 | `TANDEM_CODEX_READ` | `codex_read=` lines in `.tandem-review` | Extra directories a Codex reviewer may read (colon-separated) |
 | `TANDEM_LOG_DIR` / `TANDEM_LOG=0` | `.git/tandem-review` | Where runs are recorded / record only the response |
