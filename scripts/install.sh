@@ -14,14 +14,14 @@ choose() {
 }
 install_link() {
     local dir="$1" link="$1/tandem-review"
-    mkdir -p "$dir"
+    mkdir -p "$dir" || return 1
     if [ -L "$link" ] && [ "$(cd "$link" 2>/dev/null && pwd -P)" = "$SKILL_DIR" ]; then
         printf 'Already installed: %s\n' "$link"
     elif [ -e "$link" ] || [ -L "$link" ]; then
         printf 'Not replacing existing path: %s\n' "$link" >&2
         return 1
     else
-        ln -s "$SKILL_DIR" "$link"
+        ln -s "$SKILL_DIR" "$link" || return 1
         printf 'Installed: %s\n' "$link"
     fi
 }

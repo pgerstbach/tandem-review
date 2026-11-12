@@ -530,6 +530,12 @@ printf '\n\n\n' | HOME="$COLLISION_HOME" "$ROOT/scripts/install.sh" > "$T/instal
 RC=$?; expect_rc "installer refuses collision" 1
 expect_in "installer reports collision" "$T/install-out" 'Not replacing existing path:'
 
+BLOCKED_HOME="$T/blocked-home"; mkdir -p "$BLOCKED_HOME/.claude"; chmod 555 "$BLOCKED_HOME/.claude"
+printf '\n\n\n' | HOME="$BLOCKED_HOME" "$ROOT/scripts/install.sh" > "$T/install-out" 2>&1
+RC=$?; expect_rc "unwritable target directory -> failure" 1
+expect_not_in "failed mkdir never reported as installed" "$T/install-out" "Installed: $BLOCKED_HOME/.claude/skills/tandem-review"
+chmod 755 "$BLOCKED_HOME/.claude"
+
 echo "static checks"
 if bash -n "$REVIEW" && bash -n "$SELF" && bash -n "$ROOT/scripts/install.sh"; then ok "bash -n"; else fail "bash -n"; fi
 if command -v shellcheck >/dev/null 2>&1; then
