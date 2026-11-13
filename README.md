@@ -264,6 +264,13 @@ Tested with Claude Code 2.1.318 and Codex 0.166 on macOS and Linux:
 The CLIs change quickly. If a reviewer call breaks after an update, run the
 script by hand and check `cli.log` in the recorded run.
 
+**Experimental: Mistral Vibe.** Support for
+[Mistral Vibe](https://docs.mistral.ai/vibe/code/cli/install-setup) as a
+third agent (reviewer and implementer), plus an interactive installer, is on
+the [`vibe-reviewer`](https://github.com/pgerstbach/tandem-review/tree/vibe-reviewer)
+branch and not yet in `main`. To try it, run `git switch vibe-reviewer` in
+your clone; its README describes the limits of the Vibe reviewer.
+
 ## Development
 
 ```bash
